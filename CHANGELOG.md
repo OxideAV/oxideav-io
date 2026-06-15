@@ -10,22 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Initial **read facade** (Phase 1). A generic entry point that
-  auto-detects an image / audio / video / 3D / PDF / SVG source and
-  dispatches through the `oxideav-core` registries.
+  auto-detects an image / audio / video / SVG source and dispatches
+  through the `oxideav-core` registries.
   - `Source` (path / URI-via-`SourceRegistry` / bytes / reader) and the
-    `MediaKind` discrimination ladder (PDF → 3D → container).
-  - Unified `open()` / `open_with()` returning an `Opened` enum
-    (`Image` / `Vector` / `Scene` / `Mesh` / `Media`).
-  - Specialized `open_rgba` / `open_rgb` / `open_media` (+ `open_scene`
-    under `pdf`, `open_mesh` under `mesh`) and their `_with(ctx, …)`
-    siblings.
+    `MediaKind` discrimination ladder.
+  - Unified `open_with()` returning an `Opened` enum
+    (`Image` / `Vector` / `Media`); still images decode eagerly, audio &
+    video stay lazy behind a streaming `MediaReader`.
+  - Specialized `open_rgba_with` / `open_rgb_with` / `open_media_with`.
   - `OpenOptions` with `allow_*` / `deny_*` lists to restrict which
     container / codec may run, plus `eager_image`.
-  - Lazy `MediaReader` over the opened demuxer + resolved decoders.
   - `RgbaImage` packed-pixel buffer and the `VideoFrame` → RGBA/RGB24
     collapse (via `oxideav-pixfmt`).
-  - Feature layout: default lean `registry` base; opt-in `full`
-    (meta-backed zero-config `open(path)`) with `pdf` / `mesh`
-    eager-decode sub-features. `full` is opt-in rather than default
-    because its `oxideav-meta` fleet resolves only inside the workspace
-    until every sibling is published to crates.io.
+
+### Notes
+
+- The crate intentionally does **not** depend on `oxideav-meta`: meta's
+  full codec fleet only resolves inside the workspace (via
+  `[patch.crates-io]`), so a meta dependency — under any feature — would
+  break the standard `--all-features` crate CI and crates.io publish. The
+  zero-config `open(path)` (auto-register every codec) and the eager
+  PDF / 3D decode paths are therefore delivered by the umbrella build,
+  not this standalone crate.
