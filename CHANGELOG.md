@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.1](https://github.com/OxideAV/oxideav-io/releases/tag/v0.0.1) - 2026-06-15
+
+### Other
+
+- Drop oxideav-meta/pdf/mesh deps; lean registry-only facade
+- Default to lean `registry`; make `full` (meta-backed) opt-in
+- bootstrap + read facade (Phase 1)
+
 ### Added
 
 - Initial **read facade** (Phase 1). A generic entry point that
