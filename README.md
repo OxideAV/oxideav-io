@@ -1,10 +1,11 @@
 # oxideav-io
 
-A generic Rust entry point for **opening** (and, soon, writing and
-transcoding) media with [OxideAV]. Hand it a path — or a URI, a byte
+A generic Rust entry point for **opening**, **saving**, and
+**transcoding** media with [OxideAV]. Hand it a path — or a URI, a byte
 buffer, or any seekable reader — and it auto-detects the format and
 dispatches through the `oxideav-core` registries to give you back a
-decoded value.
+decoded value, write one back out, or convert from one format to
+another.
 
 ```rust
 use oxideav_io::{open, Opened};
@@ -51,6 +52,54 @@ run** (`allow_containers` / `deny_containers` / `allow_codecs` /
 `deny_codecs`) — handy for sandboxing untrusted input to a known-safe
 format set.
 
+## Saving
+
+`save()` is the write-side mirror of `open()`. It re-encodes an `Opened`
+value through the codec + container registries, picking the container and
+codec from the destination extension (or from `SaveOptions`):
+
+```rust
+use oxideav_io::{open, save, Opened};
+
+let opened = open("photo.png")?;
+save(&opened, "photo.jpg")?;      // re-encode PNG → JPEG by extension
+# Ok::<(), oxideav_io::Error>(())
+```
+
+`save_with(ctx, &opened, sink, &SaveOptions)` takes a `Sink`
+(`Sink::Path` / `Sink::Writer(Box<dyn Write + Send>)` /
+`Sink::Buffer(&mut Vec<u8>)`) and a `SaveOptions { container, codec,
+pixel, quality }`. `PixelChoice::{Auto, Rgb, Rgba}` selects the packed
+layout — `Auto` consults the codec's accepted-format set and prefers an
+alpha-capable layout. The whole container is assembled in memory first,
+so a seekable muxer works even over a non-seekable writer. 3D meshes
+re-encode through the mesh registry by the sink's extension; PDF/document
+`Scene` writing is out of scope for now.
+
+## Transcoding
+
+`transcode()` chains decode → optional still-image transforms → encode
+→ mux:
+
+```rust
+use oxideav_io::{transcode_with, Source, Sink, TranscodeOptions, Transform};
+# let ctx = oxideav_core::RuntimeContext::new();
+
+let opts = TranscodeOptions {
+    transforms: vec![Transform::Resize { width: 320, height: 240 }],
+    ..Default::default()
+};
+let mut out = Vec::new();
+transcode_with(&ctx, Source::Path("in.png".as_ref()), Sink::Buffer(&mut out), &opts)?;
+# Ok::<(), oxideav_io::Error>(())
+```
+
+`Transform::Resize` (via `oxideav-image-filter`, behind the default-on
+`transforms` feature) and `Transform::Convert(PixelChoice)` (via
+`oxideav-pixfmt`) cover the still-image path. The audio/video pipeline
+path (built on `oxideav-pipeline`) is the next step — a/v inputs return
+an `Unsupported` error today.
+
 ## Sources
 
 `Source` accepts whatever you have:
@@ -68,7 +117,8 @@ format set.
 | `full`     | ✅ | Zero-config `open(path)` — builds a `RuntimeContext` from `oxideav-meta` covering every codec/container/source. Turns on `pdf` + `mesh`. |
 | `registry` | via `full` | Base layer. Caller supplies a populated `RuntimeContext` and uses the `*_with(ctx, …)` functions; no `oxideav-meta` dependency. |
 | `pdf`      | via `full` | Eager PDF → `Scene` decode. |
-| `mesh`     | via `full` | Eager 3D model → `Scene3D` decode. |
+| `mesh`     | via `full` | Eager 3D model → `Scene3D` decode + 3D save. |
+| `transforms` | via `full` | `Transform::Resize` for transcode (pulls `oxideav-image-filter`). |
 
 The default `full` feature is batteries-included. For a lean build with
 no `oxideav-meta` dependency — caller registers whatever
@@ -85,8 +135,10 @@ resolve; inside the workspace it always resolves via `[patch.crates-io]`.
 
 ## Status
 
-Phase 1 (this release): the **read** facade. Writing (`save`) and
-transform-on-save / transcoding (`transcode`) are planned follow-ups.
+The **read** facade (Phase 1), the **write** facade (Phase 2), and the
+still-image **transcode** path (Phase 3) are all in place. The remaining
+follow-up is the audio/video transcode path on top of `oxideav-pipeline`
+(decode → filter graph → encode → mux).
 
 ## License
 

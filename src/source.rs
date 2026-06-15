@@ -9,6 +9,7 @@
 
 use std::borrow::Cow;
 use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 
 use oxideav_core::{ReadSeek, RuntimeContext, SourceOutput};
@@ -68,6 +69,55 @@ impl<'a> Source<'a> {
                     "source '{u}' is not a byte-shape source (packet/frame/multi-title sources are not supported by oxideav-io)"
                 ))),
             },
+        }
+    }
+}
+
+/// Something the facade can open for writing — the write-side mirror of
+/// [`Source`]. Every variant is reduced to a tightly-packed byte buffer
+/// by the encode path, then committed verbatim, so even the streaming
+/// shapes (`Writer`) work with muxers that need a seekable sink: the
+/// facade buffers the encoded bytes in memory first.
+pub enum Sink<'a> {
+    /// A local filesystem path, created / truncated with [`std::fs::File`].
+    Path(&'a Path),
+    /// A caller-supplied byte writer. Receives the finished container in
+    /// one `write_all` once encoding completes.
+    Writer(Box<dyn Write + Send>),
+    /// An in-memory buffer the encoded bytes are appended to.
+    Buffer(&'a mut Vec<u8>),
+}
+
+impl<'a> Sink<'a> {
+    /// The lowercase extension hint (no leading dot) implied by this
+    /// sink's address, if any. Drives the default container / codec
+    /// choice when [`SaveOptions`](crate::SaveOptions) leaves them unset.
+    pub(crate) fn ext_hint(&self) -> Option<String> {
+        match self {
+            Sink::Path(p) => p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_ascii_lowercase()),
+            Sink::Writer(_) | Sink::Buffer(_) => None,
+        }
+    }
+
+    /// Commit a finished byte buffer to the sink. The facade always
+    /// builds the full container in memory first (so seekable muxers
+    /// work over a non-seekable `Writer`), then hands it here.
+    pub(crate) fn commit(self, bytes: Vec<u8>) -> Result<()> {
+        match self {
+            Sink::Path(p) => std::fs::write(p, &bytes)
+                .map_err(|e| Error::Io(std::io::Error::new(e.kind(), format!("{p:?}: {e}")))),
+            Sink::Writer(mut w) => {
+                w.write_all(&bytes)?;
+                w.flush()?;
+                Ok(())
+            }
+            Sink::Buffer(buf) => {
+                buf.extend_from_slice(&bytes);
+                Ok(())
+            }
         }
     }
 }

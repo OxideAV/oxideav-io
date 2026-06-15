@@ -36,7 +36,13 @@ registry = ["dep:oxideav-core", "dep:oxideav-pixfmt"]
 # workspace knows about. Also turns on the eager 3D / PDF decode paths.
 # Resolvable only inside the workspace until the full sibling fleet is
 # published to crates.io at compatible versions.
-full = ["registry", "dep:oxideav-meta", "pdf", "mesh"]
+full = ["registry", "dep:oxideav-meta", "pdf", "mesh", "transforms"]
+
+# Still-image transforms for the transcode facade (today: `Resize`).
+# Pulls `oxideav-image-filter`. Without it, `Transform::Resize` errors
+# but `Transform::Convert` (pixel-format only, via `oxideav-pixfmt`)
+# still works.
+transforms = ["registry", "dep:oxideav-image-filter"]
 
 # Eager PDF decode path: a `.pdf` input decodes to an
 # `oxideav_scene::Scene` (one entry per page) via
@@ -64,6 +70,9 @@ oxideav-core = { version = "0.1", optional = true }
 # decoded `VideoFrame` (in whatever native format) to packed RGB24 /
 # RGBA8888.
 oxideav-pixfmt = { version = "0.1", optional = true }
+# Still-image transforms (Resize) for the transcode facade. Behind the
+# `transforms` feature so the lean `registry` build stays free of it.
+oxideav-image-filter = { version = "0.1", optional = true }
 # Aggregator — only pulled in by `full` / `mesh` so `oxideav-meta` stays
 # the workspace's pure aggregator and is never a hard dependency here.
 oxideav-meta = { version = "0.0", optional = true }

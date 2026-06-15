@@ -61,7 +61,11 @@ mod open;
 #[cfg(feature = "registry")]
 mod probe;
 #[cfg(feature = "registry")]
+mod save;
+#[cfg(feature = "registry")]
 mod source;
+#[cfg(feature = "registry")]
+mod transcode;
 
 #[cfg(feature = "registry")]
 pub use error::{Error, Result};
@@ -75,7 +79,11 @@ pub use open::{
 #[cfg(feature = "registry")]
 pub use probe::MediaKind;
 #[cfg(feature = "registry")]
-pub use source::Source;
+pub use save::{save_with, PixelChoice, SaveOptions};
+#[cfg(feature = "registry")]
+pub use source::{Sink, Source};
+#[cfg(feature = "registry")]
+pub use transcode::{transcode_with, TranscodeOptions, Transform};
 
 #[cfg(all(feature = "registry", feature = "mesh"))]
 pub use open::open_mesh_with;
@@ -140,6 +148,40 @@ pub fn open_media(path: impl AsRef<std::path::Path>) -> Result<MediaReader> {
         default_context(),
         Source::Path(path.as_ref()),
         &OpenOptions::default(),
+    )
+}
+
+/// Save an opened value to a file by path, choosing the container +
+/// codec from the path's extension.
+///
+/// Uses a process-wide context built from `oxideav-meta`. For a
+/// caller-controlled context use [`save_with`].
+#[cfg(feature = "full")]
+pub fn save(opened: &Opened, path: impl AsRef<std::path::Path>) -> Result<()> {
+    save_with(
+        default_context(),
+        opened,
+        Sink::Path(path.as_ref()),
+        &SaveOptions::default(),
+    )
+}
+
+/// Transcode a file from `src_path` to `dst_path`, auto-detecting the
+/// input format and choosing the output container/codec from the
+/// destination extension. Still-image inputs only for now.
+///
+/// Uses a process-wide context built from `oxideav-meta`. For a
+/// caller-controlled context (and transform chain) use [`transcode_with`].
+#[cfg(feature = "full")]
+pub fn transcode(
+    src_path: impl AsRef<std::path::Path>,
+    dst_path: impl AsRef<std::path::Path>,
+) -> Result<()> {
+    transcode_with(
+        default_context(),
+        Source::Path(src_path.as_ref()),
+        Sink::Path(dst_path.as_ref()),
+        &TranscodeOptions::default(),
     )
 }
 
