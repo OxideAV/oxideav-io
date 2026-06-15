@@ -1,15 +1,36 @@
 name: CI
 
-# Two CI paths:
+# Standalone (crates.io-resolvable) CI for oxideav-io.
 #
-# * `ci` (default-features) — uses the OxideAV org-level reusable
-#   workflow, which exercises the meta-backed `full` build (zero-config
-#   `open(path)` over every registered codec/container).
-# * `ci-standalone` (no-default-features + `registry`) — inline job that
-#   builds and tests the lean facade where the caller supplies its own
-#   `RuntimeContext` and `oxideav-meta` is NOT in the dependency tree.
-#   Catches regressions where the lean path accidentally regrows a
-#   `full`-only dependency.
+# WHY THIS IS NOT THE ORG REUSABLE WORKFLOW
+# -----------------------------------------
+# The org reusable workflow (`OxideAV/.github/.github/workflows/crate-ci.yml`)
+# builds `--all-features`, which turns on the default `full` feature. `full`
+# pulls `oxideav-meta`, whose transitive codec/container fleet (oxideav-ffv1,
+# oxideav-g722, oxideav-cinepak, …) is NOT yet published to crates.io at
+# resolvable versions (the published placeholders are yanked). Cargo resolves
+# EVERY declared optional dependency when it builds the lockfile — regardless
+# of which features are enabled — so the mere *declaration* of
+# `oxideav-meta = "0.0"` makes a standalone resolution fail before any build,
+# clippy, or fmt step can run. That is the documented unpublished-fleet gap
+# (oxideav-meta is not standalone-publishable; it only resolves inside the
+# workspace via `[patch.crates-io]`).
+#
+# WHAT THIS WORKFLOW DOES
+# -----------------------
+# Standalone CI exercises only the feature sets that resolve from crates.io
+# *today*: `registry` (lean, caller-supplied RuntimeContext, no meta) plus the
+# published add-ons `pdf` (oxideav-pdf + oxideav-scene) and `transforms`
+# (oxideav-image-filter). To do that, a setup step removes the three
+# unpublished-fleet optional dependencies (`oxideav-meta`, `oxideav-mesh3d`,
+# `oxideav-fbx`) and neutralises the `full` / `mesh` feature bodies in a
+# WORKING-COPY edit of Cargo.toml. The committed Cargo.toml is unchanged:
+# `default = ["full"]` and every feature/dep stays exactly as designed, and the
+# full meta-backed `open(path)` build is exercised inside the umbrella
+# workspace (which resolves the fleet via `[patch.crates-io]`).
+#
+# The `full-build` job below is a placeholder reminder that the meta-backed
+# build is validated in-workspace; it is `continue-on-error` and never gates.
 
 on:
   push:
@@ -22,13 +43,16 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  ci:
-    uses: OxideAV/.github/.github/workflows/crate-ci.yml@master
-    secrets: inherit
-
-  ci-standalone:
-    name: Build & test (registry-only)
-    runs-on: ubuntu-latest
+  # ------------------------------------------------------------------ #
+  # Lean / published-add-on slices: build + test on three OSes.        #
+  # ------------------------------------------------------------------ #
+  build-test:
+    name: Build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
 
@@ -38,10 +62,93 @@ jobs:
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: standalone
+          key: standalone-${{ matrix.os }}
 
-      - name: Build (no-default-features --features registry)
+      # Drop the unpublished meta-fleet optional deps + neutralise the
+      # meta-backed feature bodies so a standalone resolution succeeds.
+      # Working-copy edit only; never committed.
+      - name: Strip unpublished-fleet deps (working copy only)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re
+          f = "Cargo.toml"
+          s = open(f, encoding="utf-8").read()
+          for dep in ("oxideav-meta", "oxideav-mesh3d", "oxideav-fbx"):
+              s = re.sub(rf'(?m)^{dep} = .*\n', '', s)
+          s = re.sub(r'(?ms)^full = .*?\n', 'full = ["registry"]\n', s, count=1)
+          s = re.sub(r'(?ms)^mesh = \[.*?\]\n', 'mesh = ["registry"]\n', s, count=1)
+          open(f, "w", encoding="utf-8").write(s)
+          print(s)
+          PY
+
+      - name: Build (registry)
         run: cargo build --no-default-features --features registry --lib --verbose
 
-      - name: Test (no-default-features --features registry)
+      - name: Test (registry)
         run: cargo test --no-default-features --features registry --lib --verbose
+
+      - name: Build (registry,transforms,pdf)
+        run: cargo build --no-default-features --features registry,transforms,pdf --lib --verbose
+
+      - name: Test (registry,transforms,pdf)
+        run: cargo test --no-default-features --features registry,transforms,pdf --lib --verbose
+
+  # ------------------------------------------------------------------ #
+  # Lint: rustfmt + clippy on the lean slice.                          #
+  # ------------------------------------------------------------------ #
+  lint:
+    name: rustfmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
+
+      - name: rustfmt
+        run: cargo fmt --check
+
+      - name: Strip unpublished-fleet deps (working copy only)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re
+          f = "Cargo.toml"
+          s = open(f, encoding="utf-8").read()
+          for dep in ("oxideav-meta", "oxideav-mesh3d", "oxideav-fbx"):
+              s = re.sub(rf'(?m)^{dep} = .*\n', '', s)
+          s = re.sub(r'(?ms)^full = .*?\n', 'full = ["registry"]\n', s, count=1)
+          s = re.sub(r'(?ms)^mesh = \[.*?\]\n', 'mesh = ["registry"]\n', s, count=1)
+          open(f, "w", encoding="utf-8").write(s)
+          PY
+
+      - name: clippy (registry)
+        run: cargo clippy --no-default-features --features registry --all-targets --no-deps -- -D warnings
+
+      - name: clippy (registry,transforms,pdf)
+        run: cargo clippy --no-default-features --features registry,transforms,pdf --all-targets --no-deps -- -D warnings
+
+  # ------------------------------------------------------------------ #
+  # Reminder only: the meta-backed `full` build needs the sibling      #
+  # fleet published to crates.io. It is validated inside the umbrella  #
+  # workspace (resolved via [patch.crates-io]); standalone it cannot   #
+  # resolve, so this job never gates CI.                               #
+  # ------------------------------------------------------------------ #
+  full-build:
+    name: full (needs sibling fleet published)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build (--all-features) — expected to fail until fleet is published
+        run: cargo build --all-features --lib --verbose
