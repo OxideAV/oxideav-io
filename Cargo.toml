@@ -1,0 +1,68 @@
+[package]
+name = "oxideav-io"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-io"
+homepage = "https://github.com/OxideAV/oxideav-io"
+authors = ["Mark Karpeles"]
+description = "Generic open/save entry point for oxideav — auto-detects an image / video / audio / 3D / PDF / SVG file and reads, writes, or transcodes it through the oxideav-core registries"
+readme = "README.md"
+keywords = ["multimedia", "decode", "open", "image", "video"]
+categories = ["multimedia", "multimedia::encoding"]
+
+[features]
+# Batteries-included by default: `open(path)` / `save(..)` build a fully
+# populated `RuntimeContext` from `oxideav-meta` so no setup is needed.
+default = ["full"]
+
+# Base layer. The typed registry API only — the caller supplies a
+# populated `oxideav_core::RuntimeContext` and uses the `*_with(ctx, …)`
+# functions. No `oxideav-meta` dependency, so the dep tree stays lean.
+registry = ["dep:oxideav-core", "dep:oxideav-pixfmt"]
+
+# Zero-config convenience: pulls `oxideav-meta` so the no-context
+# `open(path)` / `save(opened, path)` helpers can lazily build and cache
+# a `RuntimeContext` covering every codec / container / source the
+# workspace knows about. Also turns on the eager 3D / PDF decode paths.
+full = ["registry", "dep:oxideav-meta", "pdf", "mesh"]
+
+# Eager PDF decode path: a `.pdf` input decodes to an
+# `oxideav_scene::Scene` (one entry per page) via
+# `oxideav_pdf::read_pdf_to_scene`, returned as `Opened::Scene`.
+pdf = ["registry", "dep:oxideav-pdf", "dep:oxideav-scene"]
+
+# Eager 3D decode path: an STL / OBJ / glTF / GLB / USDZ / FBX input
+# decodes to an `oxideav_mesh3d::Scene3D` via a `Mesh3DRegistry`
+# populated by `oxideav_meta::populate_mesh3d_registry`, returned as
+# `Opened::Mesh`.
+mesh = [
+    "registry",
+    "dep:oxideav-mesh3d",
+    "dep:oxideav-meta",
+    "oxideav-meta/3d",
+    "dep:oxideav-fbx",
+]
+
+[dependencies]
+# Registry framework — the source of every Decoder / Demuxer /
+# RuntimeContext we orchestrate. Optional + behind `registry` so a
+# future standalone slice of this crate can drop the framework.
+oxideav-core = { version = "0.1", optional = true }
+# Pixel-format conversion used by `open_rgb` / `open_rgba` to collapse a
+# decoded `VideoFrame` (in whatever native format) to packed RGB24 /
+# RGBA8888.
+oxideav-pixfmt = { version = "0.1", optional = true }
+# Aggregator — only pulled in by `full` / `mesh` so `oxideav-meta` stays
+# the workspace's pure aggregator and is never a hard dependency here.
+oxideav-meta = { version = "0.0", optional = true }
+# Eager PDF + Scene types (behind `pdf`).
+oxideav-pdf = { version = "0.1", optional = true }
+oxideav-scene = { version = "0.1", optional = true }
+# Eager 3D types + decoder registry (behind `mesh`).
+oxideav-mesh3d = { version = "0.0", optional = true }
+# FBX decoder is wired directly because the published `oxideav-meta`'s
+# generated `populate_mesh3d_registry` predates the FBX publish; once a
+# newer meta knows about FBX this direct dep can be dropped.
+oxideav-fbx = { version = "0.0", optional = true }

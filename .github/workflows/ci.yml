@@ -1,0 +1,47 @@
+name: CI
+
+# Two CI paths:
+#
+# * `ci` (default-features) — uses the OxideAV org-level reusable
+#   workflow, which exercises the meta-backed `full` build (zero-config
+#   `open(path)` over every registered codec/container).
+# * `ci-standalone` (no-default-features + `registry`) — inline job that
+#   builds and tests the lean facade where the caller supplies its own
+#   `RuntimeContext` and `oxideav-meta` is NOT in the dependency tree.
+#   Catches regressions where the lean path accidentally regrows a
+#   `full`-only dependency.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  ci:
+    uses: OxideAV/.github/.github/workflows/crate-ci.yml@master
+    secrets: inherit
+
+  ci-standalone:
+    name: Build & test (registry-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: standalone
+
+      - name: Build (no-default-features --features registry)
+        run: cargo build --no-default-features --features registry --lib --verbose
+
+      - name: Test (no-default-features --features registry)
+        run: cargo test --no-default-features --features registry --lib --verbose
