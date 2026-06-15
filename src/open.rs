@@ -60,8 +60,10 @@ pub enum Opened {
     /// A resolution-independent vector frame (SVG, vector PDF page).
     Vector(oxideav_core::VectorFrame),
     /// A multi-page document scene (PDF). Requires the `pdf` feature.
+    /// Boxed because `oxideav_scene::Scene` is large relative to the other
+    /// variants and would otherwise dominate every `Opened` value's size.
     #[cfg(feature = "pdf")]
-    Scene(oxideav_scene::Scene),
+    Scene(Box<oxideav_scene::Scene>),
     /// A decoded 3D model. Requires the `mesh` feature.
     #[cfg(feature = "mesh")]
     Mesh(oxideav_mesh3d::Scene3D),
@@ -414,7 +416,7 @@ fn open_pdf(mut reader: Box<dyn ReadSeek>) -> Result<Opened> {
     reader.read_to_end(&mut bytes)?;
     let scene =
         oxideav_pdf::read_pdf_to_scene(&bytes).map_err(|e| Error::Decode(format!("pdf: {e}")))?;
-    Ok(Opened::Scene(scene))
+    Ok(Opened::Scene(Box::new(scene)))
 }
 
 #[cfg(not(feature = "pdf"))]
