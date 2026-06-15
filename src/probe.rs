@@ -67,11 +67,31 @@ impl From<oxideav_core::MediaType> for StreamKind {
     }
 }
 
+/// The fast-path result of [`ping_format`](crate::ping_format) /
+/// [`ping_format_with`](crate::ping_format_with): *just* the source's
+/// broad kind and detected container/format name.
+///
+/// This is the cheapest tier — it runs the PDF / 3D / container-probe
+/// ladder but **does not open a demuxer**, so it never reads the
+/// container's stream table. Use it when all you need is "what format is
+/// this?"; reach for [`probe`](crate::probe) when you want stream/size/
+/// duration detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PingFormat {
+    /// The broad category resolved by the discrimination ladder.
+    pub kind: MediaKind,
+    /// The detected container/format name (e.g. `"png"`, `"matroska"`,
+    /// `"pdf"`, `"stl"`). For the eager PDF / 3D paths this is the format
+    /// keyword (`"pdf"` / the 3D extension); for the registry path it is
+    /// the container the registry's probe selected.
+    pub format: Option<String>,
+}
+
 /// Cheap, decode-free description of one stream inside a probed source.
 ///
 /// Populated from the demuxer's stream table (which a container fills
 /// from its header), so building one never decodes a frame.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StreamInfo {
     /// The stream's index within the container.
     pub index: u32,
@@ -87,12 +107,20 @@ pub struct StreamInfo {
     pub sample_rate: Option<u32>,
     /// Audio channel count, when advertised.
     pub channels: Option<u16>,
+    /// Declared bit rate in bits/second, when the container advertises
+    /// one. `None` for streams whose rate is not stored in the header.
+    pub bit_rate: Option<u64>,
+    /// Stream duration in seconds, derived from the container's per-stream
+    /// duration ticks and time base. `None` when the container does not
+    /// advertise a duration for this stream.
+    pub duration_secs: Option<f64>,
 }
 
 /// The result of [`probe`](crate::probe) / [`probe_with`](crate::probe_with):
-/// a source's broad kind, its detected container (when one applies), and
-/// a per-stream summary — all obtained without a full decode.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// a source's broad kind, its detected container, overall size / duration
+/// / metadata, and a per-stream summary — all obtained without a full
+/// decode (header + container stream-table parse only).
+#[derive(Clone, Debug, PartialEq)]
 pub struct Probe {
     /// The broad category resolved by the discrimination ladder.
     pub kind: MediaKind,
@@ -100,6 +128,18 @@ pub struct Probe {
     /// when the source routed through the container registry. `None` for
     /// the eager PDF / 3D paths, which have no container concept here.
     pub container: Option<String>,
+    /// Total source size in bytes, when it can be measured cheaply (a
+    /// seekable reader's stream length). `None` for sources whose length
+    /// is not known without consuming them.
+    pub byte_size: Option<u64>,
+    /// Overall container duration in seconds, when known — the
+    /// container-level duration if it advertises one, else the longest
+    /// per-stream duration. `None` when neither is available (e.g. most
+    /// still images).
+    pub duration_secs: Option<f64>,
+    /// Container-level metadata as ordered (key, value) pairs (title,
+    /// artist, …). Empty when the container carries none.
+    pub metadata: Vec<(String, String)>,
     /// Per-stream summary. Empty for the eager PDF / 3D paths.
     pub streams: Vec<StreamInfo>,
 }
@@ -185,6 +225,9 @@ mod tests {
         let p = Probe {
             kind: MediaKind::Media,
             container: Some("matroska".to_string()),
+            byte_size: Some(4096),
+            duration_secs: Some(12.5),
+            metadata: vec![("title".to_string(), "demo".to_string())],
             streams: vec![StreamInfo {
                 index: 0,
                 kind: StreamKind::Video,
@@ -193,9 +236,22 @@ mod tests {
                 height: Some(1080),
                 sample_rate: None,
                 channels: None,
+                bit_rate: Some(2_000_000),
+                duration_secs: Some(12.5),
             }],
         };
         assert_eq!(p.clone(), p);
         assert_eq!(p.streams[0].kind, StreamKind::Video);
+        assert_eq!(p.metadata[0].0, "title");
+    }
+
+    #[test]
+    fn ping_format_value_is_constructible_and_eq() {
+        let a = PingFormat {
+            kind: MediaKind::Scene,
+            format: Some("pdf".to_string()),
+        };
+        assert_eq!(a.clone(), a);
+        assert_eq!(a.kind, MediaKind::Scene);
     }
 }

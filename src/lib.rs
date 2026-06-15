@@ -73,11 +73,11 @@ pub use error::{Error, Result};
 pub use image::RgbaImage;
 #[cfg(feature = "registry")]
 pub use open::{
-    open_media_with, open_rgb_with, open_rgba_with, open_with, probe_with, DecodedFrame,
-    MediaReader, OpenOptions, Opened,
+    open_media_with, open_rgb_with, open_rgba_with, open_with, ping_format_with, probe_with,
+    DecodedFrame, MediaReader, OpenOptions, Opened,
 };
 #[cfg(feature = "registry")]
-pub use probe::{MediaKind, Probe, StreamInfo, StreamKind};
+pub use probe::{MediaKind, PingFormat, Probe, StreamInfo, StreamKind};
 #[cfg(feature = "registry")]
 pub use save::{save_with, PixelChoice, SaveOptions};
 #[cfg(feature = "registry")]
@@ -121,13 +121,39 @@ pub fn open(path: impl AsRef<std::path::Path>) -> Result<Opened> {
     )
 }
 
-/// Identify a file's [`MediaKind`], container, and stream summary
-/// **without a full decode** — the read-only inspection counterpart to
-/// [`open`].
+/// **Fast path** — identify a file's [`MediaKind`] and container/format
+/// name as cheaply as possible, without opening a demuxer or reading the
+/// container's stream table.
+///
+/// Use this when all you need is "what format is this file?"; reach for
+/// [`probe`] when you want stream / size / duration detail. Uses a
+/// process-wide context built from `oxideav-meta`. For a caller-controlled
+/// context use [`ping_format_with`].
+///
+/// ```no_run
+/// # #[cfg(feature = "full")] {
+/// use oxideav_io::{ping_format, MediaKind};
+/// let p = oxideav_io::ping_format("clip.mkv").unwrap();
+/// println!("{:?} / {:?}", p.kind, p.format);
+/// # }
+/// ```
+#[cfg(feature = "full")]
+pub fn ping_format(path: impl AsRef<std::path::Path>) -> Result<PingFormat> {
+    ping_format_with(
+        default_context(),
+        Source::Path(path.as_ref()),
+        &OpenOptions::default(),
+    )
+}
+
+/// **Full probe** — identify a file's [`MediaKind`], container, overall
+/// size / duration / metadata, and stream summary **without a full
+/// decode** — the read-only inspection counterpart to [`open`].
 ///
 /// Reads only headers (and, for the registry path, the container's
-/// stream table); no frames are decoded. Uses a process-wide context
-/// built from `oxideav-meta`. For a caller-controlled context use
+/// stream table, duration, and metadata); no frames are decoded. For a
+/// faster "format only" answer use [`ping_format`]. Uses a process-wide
+/// context built from `oxideav-meta`. For a caller-controlled context use
 /// [`probe_with`].
 ///
 /// ```no_run
@@ -135,6 +161,7 @@ pub fn open(path: impl AsRef<std::path::Path>) -> Result<Opened> {
 /// use oxideav_io::{probe, MediaKind};
 /// let info = oxideav_io::probe("clip.mkv").unwrap();
 /// assert_eq!(info.kind, MediaKind::Media);
+/// println!("{} bytes, {:?} s", info.byte_size.unwrap_or(0), info.duration_secs);
 /// for s in &info.streams {
 ///     println!("#{} {:?} {}", s.index, s.kind, s.codec);
 /// }

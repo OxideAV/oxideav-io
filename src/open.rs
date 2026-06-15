@@ -8,7 +8,7 @@ use oxideav_core::{Decoder, Demuxer, Frame, PixelFormat, ReadSeek, RuntimeContex
 use crate::error::{Error, Result};
 use crate::image::{frame_to_packed, RgbaImage};
 use crate::probe::{
-    is_mesh3d, is_pdf, peek_magic, MediaKind, Probe, StreamInfo as ProbeStreamInfo,
+    is_mesh3d, is_pdf, peek_magic, MediaKind, PingFormat, Probe, StreamInfo as ProbeStreamInfo,
 };
 use crate::source::Source;
 
@@ -259,16 +259,74 @@ pub fn open_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Resul
 
 // ───────────────────────── probe ─────────────────────────
 
-/// Identify a source's broad [`MediaKind`], detected container, and
-/// per-stream summary **without performing a full decode**.
+/// **Fast path** — identify a source's broad [`MediaKind`] and
+/// container/format name as cheaply as possible, *without* opening a
+/// demuxer or reading the container's stream table.
+///
+/// Runs the discrimination ladder — PDF magic / `.pdf` →
+/// [`MediaKind::Scene`], 3D extension → [`MediaKind::Mesh`], otherwise the
+/// container registry's `probe_input` → [`MediaKind::Media`] — and stops
+/// the instant the format is known. Use this when all you need is "what
+/// format is this file?"; reach for [`probe_with`] when you want
+/// stream / size / duration detail.
+///
+/// This is the lean entry point — the caller supplies the
+/// [`RuntimeContext`]. For the zero-config form see
+/// [`ping_format`](crate::ping_format).
+pub fn ping_format_with(
+    ctx: &RuntimeContext,
+    src: Source,
+    opts: &OpenOptions,
+) -> Result<PingFormat> {
+    let ext = opts.ext_hint.clone().or_else(|| src.ext_hint());
+    let mut reader = src.into_read_seek(ctx)?;
+    let magic = peek_magic(reader.as_mut())?;
+
+    if is_pdf(&magic, ext.as_deref()) {
+        return Ok(PingFormat {
+            kind: MediaKind::Scene,
+            format: Some("pdf".to_string()),
+        });
+    }
+    if is_mesh3d(ext.as_deref()) {
+        return Ok(PingFormat {
+            kind: MediaKind::Mesh,
+            // The 3D format is named by its extension (no container probe).
+            format: ext.clone(),
+        });
+    }
+    // Container probe only — no demuxer is opened, so the stream table is
+    // never read. Honours the deny/allow-container list (a denied
+    // container fails fast).
+    let cname = ctx
+        .containers
+        .probe_input(reader.as_mut(), ext.as_deref())
+        .map_err(|e| Error::probe(e.to_string()))?;
+    if !permitted(&cname, &opts.allow_containers, &opts.deny_containers) {
+        return Err(Error::restricted(format!(
+            "container '{cname}' is not permitted by the open options"
+        )));
+    }
+    Ok(PingFormat {
+        kind: MediaKind::Media,
+        format: Some(cname),
+    })
+}
+
+/// **Full probe** — identify a source's broad [`MediaKind`], detected
+/// container, overall size / duration / metadata, and a per-stream
+/// summary **without performing a full decode**.
 ///
 /// Runs the same discrimination ladder as [`open_with`] — PDF magic /
 /// `.pdf` → [`MediaKind::Scene`], 3D extension → [`MediaKind::Mesh`],
 /// otherwise the container registry's `probe_input` → [`MediaKind::Media`]
 /// — but stops after the container header has been parsed. For the
 /// registry path it opens the demuxer (a header parse, not a decode) and
-/// reports the stream table the container advertises; no packets are
-/// pulled and no frames are decoded.
+/// reports the stream table, container duration, and metadata the
+/// container advertises; no packets are pulled and no frames are decoded.
+///
+/// For a faster "format only" answer that never opens a demuxer, use
+/// [`ping_format_with`].
 ///
 /// Still images report as [`MediaKind::Media`] (see [`MediaKind`]): they
 /// share the codec/container registry with A/V, and separating a
@@ -281,12 +339,16 @@ pub fn probe_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Resu
     let ext = opts.ext_hint.clone().or_else(|| src.ext_hint());
     let mut reader = src.into_read_seek(ctx)?;
     let magic = peek_magic(reader.as_mut())?;
+    let byte_size = stream_len(reader.as_mut());
 
     // 1. PDF — eager Scene path; no container / stream table.
     if is_pdf(&magic, ext.as_deref()) {
         return Ok(Probe {
             kind: MediaKind::Scene,
             container: None,
+            byte_size,
+            duration_secs: None,
+            metadata: Vec::new(),
             streams: Vec::new(),
         });
     }
@@ -295,21 +357,36 @@ pub fn probe_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Resu
         return Ok(Probe {
             kind: MediaKind::Mesh,
             container: None,
+            byte_size,
+            duration_secs: None,
+            metadata: Vec::new(),
             streams: Vec::new(),
         });
     }
     // 3. Everything else through the container registry — header parse
     //    only, no frame decode.
-    probe_registry(ctx, reader, ext.as_deref(), opts)
+    probe_registry(ctx, reader, ext.as_deref(), opts, byte_size)
 }
 
-/// Detect the container and read its advertised stream table without
-/// decoding, enforcing the same allow/deny lists [`open_registry`] does.
+/// Measure a seekable reader's total length without disturbing its cursor
+/// (saved and restored). Returns `None` on any I/O error.
+fn stream_len(reader: &mut dyn ReadSeek) -> Option<u64> {
+    use std::io::SeekFrom;
+    let saved = reader.stream_position().ok()?;
+    let end = reader.seek(SeekFrom::End(0)).ok()?;
+    let _ = reader.seek(SeekFrom::Start(saved));
+    Some(end)
+}
+
+/// Detect the container and read its advertised stream table, duration,
+/// and metadata without decoding, enforcing the same allow/deny lists
+/// [`open_registry`] does.
 fn probe_registry(
     ctx: &RuntimeContext,
     mut reader: Box<dyn ReadSeek>,
     ext: Option<&str>,
     opts: &OpenOptions,
+    byte_size: Option<u64>,
 ) -> Result<Probe> {
     let cname = ctx
         .containers
@@ -323,12 +400,19 @@ fn probe_registry(
     let demuxer = ctx.containers.open_demuxer(&cname, reader, &ctx.codecs)?;
 
     let mut streams = Vec::with_capacity(demuxer.streams().len());
+    let mut max_stream_secs: Option<f64> = None;
     for s in demuxer.streams() {
         let codec_id = s.params.codec_id.as_str().to_string();
         if !permitted(&codec_id, &opts.allow_codecs, &opts.deny_codecs) {
             return Err(Error::restricted(format!(
                 "codec '{codec_id}' is not permitted by the open options"
             )));
+        }
+        // Convert the per-stream duration (ticks in the stream's time
+        // base) to seconds; track the longest as a container fallback.
+        let duration_secs = s.duration.map(|d| s.time_base.seconds_of(d));
+        if let Some(secs) = duration_secs {
+            max_stream_secs = Some(max_stream_secs.map_or(secs, |m: f64| m.max(secs)));
         }
         streams.push(ProbeStreamInfo {
             index: s.index,
@@ -338,12 +422,26 @@ fn probe_registry(
             height: s.params.height,
             sample_rate: s.params.sample_rate,
             channels: s.params.channels,
+            bit_rate: s.params.bit_rate,
+            duration_secs,
         });
     }
+
+    // Prefer the container's own duration; fall back to the longest
+    // per-stream duration when the container doesn't advertise one.
+    let duration_secs = demuxer
+        .duration_micros()
+        .map(|us| us as f64 / 1_000_000.0)
+        .or(max_stream_secs);
+
+    let metadata = demuxer.metadata().to_vec();
 
     Ok(Probe {
         kind: MediaKind::Media,
         container: Some(cname),
+        byte_size,
+        duration_secs,
+        metadata,
         streams,
     })
 }
@@ -674,6 +772,62 @@ mod tests {
             ..OpenOptions::default()
         };
         let res = probe_with(&c, Source::bytes(&bytes), &opts);
+        assert!(matches!(res, Err(Error::Restricted(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn probe_reports_byte_size() {
+        let c = ctx();
+        let bytes = tiny_ppm();
+        let info =
+            probe_with(&c, Source::bytes(&bytes), &OpenOptions::default()).expect("probe PPM");
+        assert_eq!(info.byte_size, Some(bytes.len() as u64));
+    }
+
+    // ───────────────────────── ping_format (fast path) ─────────────────────────
+
+    #[test]
+    fn ping_format_image_is_media() {
+        let c = ctx();
+        let bytes = tiny_ppm();
+        let p =
+            ping_format_with(&c, Source::bytes(&bytes), &OpenOptions::default()).expect("ping PPM");
+        assert_eq!(p.kind, MediaKind::Media);
+        assert!(p.format.is_some(), "expected a container/format name");
+    }
+
+    #[test]
+    fn ping_format_pdf_is_scene() {
+        let c = ctx();
+        let bytes = b"%PDF-1.7\n%junk".to_vec();
+        let p =
+            ping_format_with(&c, Source::bytes(&bytes), &OpenOptions::default()).expect("ping PDF");
+        assert_eq!(p.kind, MediaKind::Scene);
+        assert_eq!(p.format.as_deref(), Some("pdf"));
+    }
+
+    #[test]
+    fn ping_format_mesh_by_extension() {
+        let c = ctx();
+        let bytes = b"solid cube\nendsolid cube\n".to_vec();
+        let opts = OpenOptions {
+            ext_hint: Some("stl".to_string()),
+            ..OpenOptions::default()
+        };
+        let p = ping_format_with(&c, Source::bytes(&bytes), &opts).expect("ping STL");
+        assert_eq!(p.kind, MediaKind::Mesh);
+        assert_eq!(p.format.as_deref(), Some("stl"));
+    }
+
+    #[test]
+    fn ping_format_respects_deny_container() {
+        let c = ctx();
+        let bytes = tiny_ppm();
+        let opts = OpenOptions {
+            deny_containers: vec!["pbm".to_string()],
+            ..OpenOptions::default()
+        };
+        let res = ping_format_with(&c, Source::bytes(&bytes), &opts);
         assert!(matches!(res, Err(Error::Restricted(_))), "got {res:?}");
     }
 }

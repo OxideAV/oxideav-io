@@ -54,10 +54,36 @@ format set.
 
 ## Probing (identify without decoding)
 
-When you only need to know *what* a file is — its broad kind, its
-container, and its streams — call `probe()` instead of `open()`. It runs
-the same discrimination ladder but stops after the header / container
-stream table; **no frames are decoded**.
+When you only need to know *what* a file is — not its pixels or samples —
+the facade offers two tiers, both running the same discrimination ladder
+but stopping early; **neither decodes a frame**.
+
+### `ping_format()` — fast path (format only)
+
+The cheapest answer to "what format is this?". It runs the ladder and
+stops the instant the format is known — it **does not open a demuxer**, so
+it never reads the container's stream table.
+
+```rust
+use oxideav_io::{ping_format, MediaKind};
+
+let p = ping_format("clip.mkv")?;
+println!("{:?} / {:?}", p.kind, p.format); // e.g. Media / Some("matroska")
+# Ok::<(), oxideav_io::Error>(())
+```
+
+```rust
+pub struct PingFormat {
+    pub kind: MediaKind,        // Scene | Mesh | Media
+    pub format: Option<String>, // "pdf", "stl", "matroska", "png", …
+}
+```
+
+### `probe()` — full probe (size / duration / streams)
+
+When you want detail — overall byte size, duration, container metadata,
+and a per-stream summary — call `probe()`. It opens the demuxer (a header
+parse, not a decode) and reports what the container advertises.
 
 ```rust
 use oxideav_io::{probe, MediaKind, StreamKind};
@@ -86,15 +112,19 @@ match info.kind {
 
 ```rust
 pub struct Probe {
-    pub kind: MediaKind,           // Scene | Mesh | Media
-    pub container: Option<String>, // e.g. "png", "matroska"; None for PDF/3D
-    pub streams: Vec<StreamInfo>,  // empty for PDF/3D
+    pub kind: MediaKind,                 // Scene | Mesh | Media
+    pub container: Option<String>,       // e.g. "png", "matroska"; None for PDF/3D
+    pub byte_size: Option<u64>,          // total size, when cheaply measurable
+    pub duration_secs: Option<f64>,      // container or longest-stream duration
+    pub metadata: Vec<(String, String)>, // title, artist, … (container-level)
+    pub streams: Vec<StreamInfo>,        // empty for PDF/3D
 }
 ```
 
 Each `StreamInfo` carries `index`, `kind` (`StreamKind::{Audio, Video,
 Subtitle, Data, Unknown}`), the `codec` id, and whatever the container
-advertises cheaply (`width` / `height` / `sample_rate` / `channels`).
+advertises cheaply (`width` / `height` / `sample_rate` / `channels` /
+`bit_rate` / `duration_secs`).
 
 The discrimination ladder mirrors `open()`:
 
@@ -108,11 +138,12 @@ would require a decode, **still images report as `MediaKind::Media`**
 (with one video-kind stream), not as a distinct image kind — that
 distinction is made by `open()` *after* decoding.
 
-`probe()` uses the process-wide `oxideav-meta` context (the `full`
-feature). The lean form `probe_with(ctx, source, &OpenOptions)` takes a
-caller-supplied `RuntimeContext` and honours the same
-`allow_*`/`deny_*` lists as the openers, so a denied container/codec is
-rejected before any header is fully parsed.
+Both tiers use the process-wide `oxideav-meta` context (the `full`
+feature). The lean forms `ping_format_with(ctx, source, &OpenOptions)` and
+`probe_with(ctx, source, &OpenOptions)` take a caller-supplied
+`RuntimeContext` and honour the same `allow_*`/`deny_*` lists as the
+openers, so a denied container/codec is rejected before any header is
+fully parsed.
 
 ## Saving
 

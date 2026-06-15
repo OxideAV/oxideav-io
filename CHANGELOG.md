@@ -9,23 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Format-probe API.** Identify a source's broad kind, container, and
-  per-stream summary **without a full decode**.
-  - `probe_with(ctx, Source, &OpenOptions)` (lean) and the zero-config
-    `probe(path)` (under `full`) run the same PDF → 3D → container
-    discrimination ladder as `open()` but stop after the header /
-    container stream table — no frames are decoded.
-  - New public types: `Probe { kind, container, streams }`, the
-    facade-owned `StreamInfo { index, kind, codec, width, height,
-    sample_rate, channels }`, and `StreamKind { Audio, Video, Subtitle,
-    Data, Unknown }` (a `From<oxideav_core::MediaType>` mirror so the
-    probe surface doesn't leak a core type into lean callers).
+- **Two-tier format-probe API.** Identify a source **without a full
+  decode**, at two levels of detail.
+  - **Fast path** — `ping_format_with(ctx, Source, &OpenOptions)` (lean)
+    and the zero-config `ping_format(path)` (under `full`): runs the
+    PDF → 3D → container discrimination ladder and stops the instant the
+    format is known. **Does not open a demuxer** (never reads the stream
+    table). Returns `PingFormat { kind, format }`.
+  - **Full probe** — `probe_with(ctx, Source, &OpenOptions)` (lean) and
+    the zero-config `probe(path)` (under `full`): opens the demuxer (a
+    header parse, not a decode) and reports overall size / duration /
+    metadata plus a per-stream summary. Returns `Probe { kind, container,
+    byte_size, duration_secs, metadata, streams }`.
+  - New public types: `PingFormat`, `Probe`, the facade-owned
+    `StreamInfo { index, kind, codec, width, height, sample_rate,
+    channels, bit_rate, duration_secs }`, and `StreamKind { Audio, Video,
+    Subtitle, Data, Unknown }` (a `From<oxideav_core::MediaType>` mirror
+    so the probe surface doesn't leak a core type into lean callers).
   - PDF → `MediaKind::Scene`, 3D → `MediaKind::Mesh` (both with no
     container / empty stream list); everything else →
     `MediaKind::Media` with the detected container name and its stream
     table. Still images report as `Media` with one video-kind stream
     (separating image-vs-1-frame-video needs a decode, which probe
-    avoids). Honours the same `allow_*`/`deny_*` lists as the openers.
+    avoids). Both tiers honour the same `allow_*`/`deny_*` lists as the
+    openers.
 
 ## [0.0.1](https://github.com/OxideAV/oxideav-io/releases/tag/v0.0.1) - 2026-06-15
 
