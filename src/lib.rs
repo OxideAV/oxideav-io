@@ -73,11 +73,11 @@ pub use error::{Error, Result};
 pub use image::RgbaImage;
 #[cfg(feature = "registry")]
 pub use open::{
-    open_media_with, open_rgb_with, open_rgba_with, open_with, DecodedFrame, MediaReader,
-    OpenOptions, Opened,
+    open_media_with, open_rgb_with, open_rgba_with, open_with, probe_with, DecodedFrame,
+    MediaReader, OpenOptions, Opened,
 };
 #[cfg(feature = "registry")]
-pub use probe::MediaKind;
+pub use probe::{MediaKind, Probe, StreamInfo, StreamKind};
 #[cfg(feature = "registry")]
 pub use save::{save_with, PixelChoice, SaveOptions};
 #[cfg(feature = "registry")]
@@ -118,6 +118,34 @@ pub fn open(path: impl AsRef<std::path::Path>) -> Result<Opened> {
         default_context(),
         Source::Path(path.as_ref()),
         &OpenOptions::eager(),
+    )
+}
+
+/// Identify a file's [`MediaKind`], container, and stream summary
+/// **without a full decode** — the read-only inspection counterpart to
+/// [`open`].
+///
+/// Reads only headers (and, for the registry path, the container's
+/// stream table); no frames are decoded. Uses a process-wide context
+/// built from `oxideav-meta`. For a caller-controlled context use
+/// [`probe_with`].
+///
+/// ```no_run
+/// # #[cfg(feature = "full")] {
+/// use oxideav_io::{probe, MediaKind};
+/// let info = oxideav_io::probe("clip.mkv").unwrap();
+/// assert_eq!(info.kind, MediaKind::Media);
+/// for s in &info.streams {
+///     println!("#{} {:?} {}", s.index, s.kind, s.codec);
+/// }
+/// # }
+/// ```
+#[cfg(feature = "full")]
+pub fn probe(path: impl AsRef<std::path::Path>) -> Result<Probe> {
+    probe_with(
+        default_context(),
+        Source::Path(path.as_ref()),
+        &OpenOptions::default(),
     )
 }
 

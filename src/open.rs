@@ -7,7 +7,9 @@ use oxideav_core::{Decoder, Demuxer, Frame, PixelFormat, ReadSeek, RuntimeContex
 
 use crate::error::{Error, Result};
 use crate::image::{frame_to_packed, RgbaImage};
-use crate::probe::{is_mesh3d, is_pdf, peek_magic};
+use crate::probe::{
+    is_mesh3d, is_pdf, peek_magic, MediaKind, Probe, StreamInfo as ProbeStreamInfo,
+};
 use crate::source::Source;
 
 /// Per-call knobs shared by every opener. Restricts which container /
@@ -253,6 +255,97 @@ pub fn open_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Resul
         }
         _ => Ok(Opened::Media(reader)),
     }
+}
+
+// ───────────────────────── probe ─────────────────────────
+
+/// Identify a source's broad [`MediaKind`], detected container, and
+/// per-stream summary **without performing a full decode**.
+///
+/// Runs the same discrimination ladder as [`open_with`] — PDF magic /
+/// `.pdf` → [`MediaKind::Scene`], 3D extension → [`MediaKind::Mesh`],
+/// otherwise the container registry's `probe_input` → [`MediaKind::Media`]
+/// — but stops after the container header has been parsed. For the
+/// registry path it opens the demuxer (a header parse, not a decode) and
+/// reports the stream table the container advertises; no packets are
+/// pulled and no frames are decoded.
+///
+/// Still images report as [`MediaKind::Media`] (see [`MediaKind`]): they
+/// share the codec/container registry with A/V, and separating a
+/// single-frame image from a 1-frame video would require a decode.
+///
+/// This is the lean entry point — the caller supplies the
+/// [`RuntimeContext`]. For the zero-config form see
+/// [`probe`](crate::probe).
+pub fn probe_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Result<Probe> {
+    let ext = opts.ext_hint.clone().or_else(|| src.ext_hint());
+    let mut reader = src.into_read_seek(ctx)?;
+    let magic = peek_magic(reader.as_mut())?;
+
+    // 1. PDF — eager Scene path; no container / stream table.
+    if is_pdf(&magic, ext.as_deref()) {
+        return Ok(Probe {
+            kind: MediaKind::Scene,
+            container: None,
+            streams: Vec::new(),
+        });
+    }
+    // 2. 3D model — eager Mesh path; no container / stream table.
+    if is_mesh3d(ext.as_deref()) {
+        return Ok(Probe {
+            kind: MediaKind::Mesh,
+            container: None,
+            streams: Vec::new(),
+        });
+    }
+    // 3. Everything else through the container registry — header parse
+    //    only, no frame decode.
+    probe_registry(ctx, reader, ext.as_deref(), opts)
+}
+
+/// Detect the container and read its advertised stream table without
+/// decoding, enforcing the same allow/deny lists [`open_registry`] does.
+fn probe_registry(
+    ctx: &RuntimeContext,
+    mut reader: Box<dyn ReadSeek>,
+    ext: Option<&str>,
+    opts: &OpenOptions,
+) -> Result<Probe> {
+    let cname = ctx
+        .containers
+        .probe_input(reader.as_mut(), ext)
+        .map_err(|e| Error::probe(e.to_string()))?;
+    if !permitted(&cname, &opts.allow_containers, &opts.deny_containers) {
+        return Err(Error::restricted(format!(
+            "container '{cname}' is not permitted by the open options"
+        )));
+    }
+    let demuxer = ctx.containers.open_demuxer(&cname, reader, &ctx.codecs)?;
+
+    let mut streams = Vec::with_capacity(demuxer.streams().len());
+    for s in demuxer.streams() {
+        let codec_id = s.params.codec_id.as_str().to_string();
+        if !permitted(&codec_id, &opts.allow_codecs, &opts.deny_codecs) {
+            return Err(Error::restricted(format!(
+                "codec '{codec_id}' is not permitted by the open options"
+            )));
+        }
+        streams.push(ProbeStreamInfo {
+            index: s.index,
+            kind: s.params.media_type.into(),
+            codec: codec_id,
+            width: s.params.width,
+            height: s.params.height,
+            sample_rate: s.params.sample_rate,
+            channels: s.params.channels,
+        });
+    }
+
+    Ok(Probe {
+        kind: MediaKind::Media,
+        container: Some(cname),
+        streams,
+    })
 }
 
 /// True when the reader holds exactly one buffered frame, the streams
@@ -505,6 +598,82 @@ mod tests {
             ..OpenOptions::default()
         };
         let res = open_rgba_with(&c, Source::bytes(&bytes), &opts);
+        assert!(matches!(res, Err(Error::Restricted(_))), "got {res:?}");
+    }
+
+    // ───────────────────────── probe ─────────────────────────
+
+    #[test]
+    fn probe_still_image_is_media_with_video_stream() {
+        let c = ctx();
+        let bytes = tiny_ppm();
+        let info =
+            probe_with(&c, Source::bytes(&bytes), &OpenOptions::default()).expect("probe PPM");
+        assert_eq!(info.kind, MediaKind::Media);
+        // A raster image routes through the container registry, so it
+        // has a container + a single video-kind stream.
+        assert!(info.container.is_some(), "expected a container name");
+        assert_eq!(info.streams.len(), 1, "got {:?}", info.streams);
+        let s = &info.streams[0];
+        assert_eq!(s.kind, crate::StreamKind::Video);
+        assert_eq!((s.width, s.height), (Some(2), Some(2)));
+        assert!(!s.codec.is_empty());
+    }
+
+    #[test]
+    fn probe_does_not_decode() {
+        // Header is a valid PPM but the pixel payload is truncated to a
+        // single byte. A full decode would fail; probe must succeed
+        // because it only parses the header / stream table.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"P6\n2 2\n255\n");
+        bytes.push(0); // far short of the 12 bytes a 2x2 RGB image needs
+        let c = ctx();
+        let info = probe_with(&c, Source::bytes(&bytes), &OpenOptions::default())
+            .expect("probe truncated PPM header");
+        assert_eq!(info.kind, MediaKind::Media);
+        assert_eq!(info.streams.len(), 1);
+        assert_eq!(
+            (info.streams[0].width, info.streams[0].height),
+            (Some(2), Some(2))
+        );
+    }
+
+    #[test]
+    fn probe_pdf_is_scene() {
+        let c = ctx();
+        let bytes = b"%PDF-1.7\n%trailer junk".to_vec();
+        let info =
+            probe_with(&c, Source::bytes(&bytes), &OpenOptions::default()).expect("probe PDF");
+        assert_eq!(info.kind, MediaKind::Scene);
+        assert!(info.container.is_none());
+        assert!(info.streams.is_empty());
+    }
+
+    #[test]
+    fn probe_mesh_by_extension_is_mesh() {
+        let c = ctx();
+        // STL ASCII header; classification is by extension hint only.
+        let bytes = b"solid cube\nendsolid cube\n".to_vec();
+        let opts = OpenOptions {
+            ext_hint: Some("stl".to_string()),
+            ..OpenOptions::default()
+        };
+        let info = probe_with(&c, Source::bytes(&bytes), &opts).expect("probe STL");
+        assert_eq!(info.kind, MediaKind::Mesh);
+        assert!(info.container.is_none());
+        assert!(info.streams.is_empty());
+    }
+
+    #[test]
+    fn probe_respects_deny_container() {
+        let c = ctx();
+        let bytes = tiny_ppm();
+        let opts = OpenOptions {
+            deny_containers: vec!["pbm".to_string()],
+            ..OpenOptions::default()
+        };
+        let res = probe_with(&c, Source::bytes(&bytes), &opts);
         assert!(matches!(res, Err(Error::Restricted(_))), "got {res:?}");
     }
 }

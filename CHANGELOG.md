@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Format-probe API.** Identify a source's broad kind, container, and
+  per-stream summary **without a full decode**.
+  - `probe_with(ctx, Source, &OpenOptions)` (lean) and the zero-config
+    `probe(path)` (under `full`) run the same PDF → 3D → container
+    discrimination ladder as `open()` but stop after the header /
+    container stream table — no frames are decoded.
+  - New public types: `Probe { kind, container, streams }`, the
+    facade-owned `StreamInfo { index, kind, codec, width, height,
+    sample_rate, channels }`, and `StreamKind { Audio, Video, Subtitle,
+    Data, Unknown }` (a `From<oxideav_core::MediaType>` mirror so the
+    probe surface doesn't leak a core type into lean callers).
+  - PDF → `MediaKind::Scene`, 3D → `MediaKind::Mesh` (both with no
+    container / empty stream list); everything else →
+    `MediaKind::Media` with the detected container name and its stream
+    table. Still images report as `Media` with one video-kind stream
+    (separating image-vs-1-frame-video needs a decode, which probe
+    avoids). Honours the same `allow_*`/`deny_*` lists as the openers.
+
 ## [0.0.1](https://github.com/OxideAV/oxideav-io/releases/tag/v0.0.1) - 2026-06-15
 
 ### Other

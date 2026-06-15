@@ -52,6 +52,68 @@ run** (`allow_containers` / `deny_containers` / `allow_codecs` /
 `deny_codecs`) — handy for sandboxing untrusted input to a known-safe
 format set.
 
+## Probing (identify without decoding)
+
+When you only need to know *what* a file is — its broad kind, its
+container, and its streams — call `probe()` instead of `open()`. It runs
+the same discrimination ladder but stops after the header / container
+stream table; **no frames are decoded**.
+
+```rust
+use oxideav_io::{probe, MediaKind, StreamKind};
+
+let info = probe("clip.mkv")?;
+match info.kind {
+    MediaKind::Scene => println!("a PDF document"),
+    MediaKind::Mesh  => println!("a 3D model"),
+    MediaKind::Media => {
+        println!("container: {:?}", info.container);
+        for s in &info.streams {
+            match s.kind {
+                StreamKind::Video => println!("#{} video {}: {:?}x{:?}",
+                    s.index, s.codec, s.width, s.height),
+                StreamKind::Audio => println!("#{} audio {}: {:?} Hz, {:?} ch",
+                    s.index, s.codec, s.sample_rate, s.channels),
+                _ => println!("#{} {:?} {}", s.index, s.kind, s.codec),
+            }
+        }
+    }
+}
+# Ok::<(), oxideav_io::Error>(())
+```
+
+`probe()` returns a `Probe`:
+
+```rust
+pub struct Probe {
+    pub kind: MediaKind,           // Scene | Mesh | Media
+    pub container: Option<String>, // e.g. "png", "matroska"; None for PDF/3D
+    pub streams: Vec<StreamInfo>,  // empty for PDF/3D
+}
+```
+
+Each `StreamInfo` carries `index`, `kind` (`StreamKind::{Audio, Video,
+Subtitle, Data, Unknown}`), the `codec` id, and whatever the container
+advertises cheaply (`width` / `height` / `sample_rate` / `channels`).
+
+The discrimination ladder mirrors `open()`:
+
+1. PDF magic (`%PDF-`) or `.pdf` extension → `MediaKind::Scene`;
+2. a 3D extension (`stl`/`obj`/`gltf`/`glb`/`usdz`/`fbx`) → `MediaKind::Mesh`;
+3. otherwise the container registry's probe → `MediaKind::Media`, with the
+   detected container and its stream table.
+
+Because telling a single-frame still image apart from a 1-frame video
+would require a decode, **still images report as `MediaKind::Media`**
+(with one video-kind stream), not as a distinct image kind — that
+distinction is made by `open()` *after* decoding.
+
+`probe()` uses the process-wide `oxideav-meta` context (the `full`
+feature). The lean form `probe_with(ctx, source, &OpenOptions)` takes a
+caller-supplied `RuntimeContext` and honours the same
+`allow_*`/`deny_*` lists as the openers, so a denied container/codec is
+rejected before any header is fully parsed.
+
 ## Saving
 
 `save()` is the write-side mirror of `open()`. It re-encodes an `Opened`
