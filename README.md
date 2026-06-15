@@ -65,14 +65,23 @@ format set.
 
 | Feature    | Default | Effect |
 |------------|:-------:|--------|
-| `full`     | ✅ | Zero-config `open(path)` — builds a `RuntimeContext` from `oxideav-meta` covering every codec/container/source. Turns on `pdf` + `mesh`. |
-| `registry` |   | Base layer. Caller supplies a populated `RuntimeContext` and uses the `*_with(ctx, …)` functions. No `oxideav-meta` dependency — keeps meta a pure aggregator. |
+| `registry` | ✅ | Base layer. Caller supplies a populated `RuntimeContext` and uses the `*_with(ctx, …)` functions. No `oxideav-meta` dependency — keeps meta a pure aggregator and resolves cleanly from crates.io. |
+| `full`     |   | Zero-config `open(path)` — builds a `RuntimeContext` from `oxideav-meta` covering every codec/container/source. Turns on `pdf` + `mesh`. |
 | `pdf`      | via `full` | Eager PDF → `Scene` decode. |
 | `mesh`     | via `full` | Eager 3D model → `Scene3D` decode. |
 
-Building with `--no-default-features --features registry` gives a lean
-facade that never pulls in `oxideav-meta`; the caller is responsible for
-registering whatever codecs/containers it needs.
+The default is the lean `registry` facade; the caller registers whatever
+codecs/containers it needs (or reuses a context it already has). Enable
+`full` for the batteries-included zero-config helpers:
+
+```toml
+oxideav-io = { version = "0.0", features = ["full"] }
+```
+
+`full` pulls `oxideav-meta`, whose transitive codec fleet resolves only
+inside the workspace (via `[patch.crates-io]`) until every sibling is
+published to crates.io at compatible versions — which is why it is
+opt-in rather than the default.
 
 ## Status
 

@@ -13,19 +13,26 @@ keywords = ["multimedia", "decode", "open", "image", "video"]
 categories = ["multimedia", "multimedia::encoding"]
 
 [features]
-# Batteries-included by default: `open(path)` / `save(..)` build a fully
-# populated `RuntimeContext` from `oxideav-meta` so no setup is needed.
-default = ["full"]
+# Default is the lean `registry` layer. `full` is opt-in because it
+# pulls `oxideav-meta`, whose transitive codec fleet only resolves
+# inside the workspace (via `[patch.crates-io]`) — a meta-backed default
+# would make the crate unresolvable from crates.io standalone. Enable
+# `full` for the zero-config `open(path)` helpers:
+#   oxideav-io = { version = "0.0", features = ["full"] }
+default = ["registry"]
 
 # Base layer. The typed registry API only — the caller supplies a
 # populated `oxideav_core::RuntimeContext` and uses the `*_with(ctx, …)`
-# functions. No `oxideav-meta` dependency, so the dep tree stays lean.
+# functions. No `oxideav-meta` dependency, so the dep tree stays lean and
+# resolves cleanly from crates.io.
 registry = ["dep:oxideav-core", "dep:oxideav-pixfmt"]
 
 # Zero-config convenience: pulls `oxideav-meta` so the no-context
 # `open(path)` / `save(opened, path)` helpers can lazily build and cache
 # a `RuntimeContext` covering every codec / container / source the
 # workspace knows about. Also turns on the eager 3D / PDF decode paths.
+# Resolvable only inside the workspace until the full sibling fleet is
+# published to crates.io at compatible versions.
 full = ["registry", "dep:oxideav-meta", "pdf", "mesh"]
 
 # Eager PDF decode path: a `.pdf` input decodes to an

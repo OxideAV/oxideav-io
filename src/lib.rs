@@ -29,13 +29,24 @@
 //! # }
 //! ```
 //!
-//! ## Lean mode
+//! ## Features
 //!
-//! With `--no-default-features --features registry`, the zero-config
-//! `open(path)` helpers are gone; the caller supplies a populated
-//! [`oxideav_core::RuntimeContext`] and uses the `*_with(ctx, …)`
-//! functions. This keeps the dependency tree minimal and never pulls in
-//! `oxideav-meta`, so meta stays the workspace's pure aggregator.
+//! The default is the lean **`registry`** layer: the caller supplies a
+//! populated [`oxideav_core::RuntimeContext`] and uses the
+//! `*_with(ctx, …)` functions. It never pulls in `oxideav-meta`, so the
+//! dependency tree stays minimal and resolves cleanly from crates.io.
+//!
+//! Enable **`full`** for the zero-config `open(path)` helpers — it pulls
+//! `oxideav-meta` to build a context covering every codec/container the
+//! workspace knows about:
+//!
+//! ```toml
+//! oxideav-io = { version = "0.0", features = ["full"] }
+//! ```
+//!
+//! (`full` resolves only inside the workspace until the whole sibling
+//! fleet is published to crates.io at compatible versions, so it is
+//! opt-in rather than default.)
 
 #![forbid(unsafe_code)]
 

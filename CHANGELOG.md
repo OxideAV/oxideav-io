@@ -24,5 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Lazy `MediaReader` over the opened demuxer + resolved decoders.
   - `RgbaImage` packed-pixel buffer and the `VideoFrame` → RGBA/RGB24
     collapse (via `oxideav-pixfmt`).
-  - Feature layout: default `full` (meta-backed zero-config) over a lean
-    `registry` base, with `pdf` / `mesh` eager-decode sub-features.
+  - Feature layout: default lean `registry` base; opt-in `full`
+    (meta-backed zero-config `open(path)`) with `pdf` / `mesh`
+    eager-decode sub-features. `full` is opt-in rather than default
+    because its `oxideav-meta` fleet resolves only inside the workspace
+    until every sibling is published to crates.io.
