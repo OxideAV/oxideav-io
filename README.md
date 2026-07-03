@@ -1,5 +1,7 @@
 # oxideav-io
 
+[![CI](https://github.com/OxideAV/oxideav-io/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-io/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-io.svg)](https://crates.io/crates/oxideav-io) [![docs.rs](https://docs.rs/oxideav-io/badge.svg)](https://docs.rs/oxideav-io) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A generic Rust entry point for **opening**, **saving**, and
 **transcoding** media with [OxideAV]. Hand it a path — or a URI, a byte
 buffer, or any seekable reader — and it auto-detects the format and
