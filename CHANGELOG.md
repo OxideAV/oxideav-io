@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/OxideAV/oxideav-io/compare/v0.1.0...v0.1.1) - 2026-07-09
+
+### Fixed
+
+- PixelChoice::Auto now walks an encoder-capability candidate ladder; y4m derives its rawvideo payload codec
+
+### Other
+
+- Source::Uri integration (data: / file:// probing) + anchor .gitignore Cargo.lock
+- criterion benches for the probe hot paths + BENCHMARKS.md baseline
+- probe contract, typed accessors, and seekability contract in README + CHANGELOG
+- fixture-backed probe coverage matrix (14 formats, both tiers)
+- typed accessors on Probe / StreamInfo
+- enforce + pin the ping_format read-budget contract
+- regroup xorshift seed literal digits (clippy unusual_byte_groupings)
+- misdetection-hardening sweep for the probe dispatcher
+
 ### Added
 
 - **Enforced `ping_format` read budget.** New public constant
