@@ -150,6 +150,76 @@ pub(crate) const MESH3D_EXTS: &[&str] = &["stl", "obj", "gltf", "glb", "usdz", "
 /// How many leading bytes to sniff for magic-number detection.
 const MAGIC_LEN: usize = 1024;
 
+/// The hard upper bound on how many bytes
+/// [`ping_format`](crate::ping_format) / [`ping_format_with`](crate::ping_format_with)
+/// may **read** from a source, in total.
+///
+/// This is the fast path's contract: one [`MAGIC_LEN`]-byte magic peek
+/// plus the container registry's fixed 256 KiB probe window — both taken
+/// from the **start** of the source, with the cursor restored afterwards.
+/// `ping_format` enforces the bound at the reader level (a read past it
+/// fails with an I/O error), so the promise holds even if a future probe
+/// implementation tries to read more. The full [`probe`](crate::probe)
+/// tier is *not* bounded: its demuxer header parse may legitimately seek
+/// anywhere (e.g. an index or stream table stored at the end of the
+/// container).
+pub const PING_FORMAT_MAX_READ_BYTES: u64 = (MAGIC_LEN + 256 * 1024) as u64;
+
+/// A [`ReadSeek`] adapter that fails any read past a total-bytes budget.
+///
+/// Wrapped around the source inside `ping_format_with` to *enforce*
+/// [`PING_FORMAT_MAX_READ_BYTES`]: seeking is free (probing seeks to the
+/// start and restores the cursor), but the cumulative bytes handed out by
+/// `read` may not exceed the budget. The budget equals the fast path's
+/// worst-case legitimate consumption, so a well-behaved probe never trips
+/// it — it exists to turn a future overreaching probe into a loud,
+/// deterministic error instead of a silently slow `ping_format`.
+pub(crate) struct BoundedReader<R> {
+    inner: R,
+    /// Total bytes handed out by `read` so far.
+    consumed: u64,
+    /// Maximum total bytes `read` may hand out.
+    budget: u64,
+}
+
+impl<R: ReadSeek> BoundedReader<R> {
+    pub(crate) fn new(inner: R, budget: u64) -> Self {
+        BoundedReader {
+            inner,
+            consumed: 0,
+            budget,
+        }
+    }
+}
+
+impl<R: ReadSeek> std::io::Read for BoundedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let remaining = self.budget.saturating_sub(self.consumed);
+        if remaining == 0 {
+            return Err(std::io::Error::other(format!(
+                "ping_format read budget exhausted ({} bytes): probing must not \
+                 read more than PING_FORMAT_MAX_READ_BYTES",
+                self.budget
+            )));
+        }
+        let cap = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        let n = self.inner.read(&mut buf[..cap])?;
+        self.consumed += n as u64;
+        Ok(n)
+    }
+}
+
+impl<R: ReadSeek> std::io::Seek for BoundedReader<R> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
 /// Read up to [`MAGIC_LEN`] leading bytes without disturbing the cursor
 /// (restored to its prior position on return).
 pub(crate) fn peek_magic(input: &mut dyn ReadSeek) -> Result<Vec<u8>> {
@@ -243,6 +313,36 @@ mod tests {
         assert_eq!(p.clone(), p);
         assert_eq!(p.streams[0].kind, StreamKind::Video);
         assert_eq!(p.metadata[0].0, "title");
+    }
+
+    #[test]
+    fn bounded_reader_enforces_its_budget() {
+        use std::io::{Cursor, Read, Seek};
+        let data = (0u8..64).collect::<Vec<u8>>();
+        let mut r = BoundedReader::new(Cursor::new(data), 10);
+
+        // Within budget: normal reads, capped at the remaining budget.
+        let mut buf = [0u8; 8];
+        assert_eq!(r.read(&mut buf).unwrap(), 8);
+        assert_eq!(r.read(&mut buf).unwrap(), 2, "read is capped at budget");
+
+        // Budget exhausted: any further non-empty read is an error…
+        let err = r.read(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("budget"), "got: {err}");
+        // …but empty reads and seeks stay free.
+        assert_eq!(r.read(&mut []).unwrap(), 0);
+        assert_eq!(r.seek(SeekFrom::Start(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn bounded_reader_eof_does_not_consume_budget() {
+        use std::io::{Cursor, Read};
+        let mut r = BoundedReader::new(Cursor::new(vec![1u8, 2, 3]), 10);
+        let mut buf = [0u8; 8];
+        assert_eq!(r.read(&mut buf).unwrap(), 3);
+        // EOF: Ok(0) forever, never a budget error (only 3 bytes consumed).
+        assert_eq!(r.read(&mut buf).unwrap(), 0);
+        assert_eq!(r.read(&mut buf).unwrap(), 0);
     }
 
     #[test]

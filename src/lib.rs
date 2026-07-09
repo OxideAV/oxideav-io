@@ -77,7 +77,7 @@ pub use open::{
     DecodedFrame, MediaReader, OpenOptions, Opened,
 };
 #[cfg(feature = "registry")]
-pub use probe::{MediaKind, PingFormat, Probe, StreamInfo, StreamKind};
+pub use probe::{MediaKind, PingFormat, Probe, StreamInfo, StreamKind, PING_FORMAT_MAX_READ_BYTES};
 #[cfg(feature = "registry")]
 pub use save::{save_with, PixelChoice, SaveOptions};
 #[cfg(feature = "registry")]

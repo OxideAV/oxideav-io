@@ -279,8 +279,16 @@ pub fn ping_format_with(
     opts: &OpenOptions,
 ) -> Result<PingFormat> {
     let ext = opts.ext_hint.clone().or_else(|| src.ext_hint());
-    let mut reader = src.into_read_seek(ctx)?;
-    let magic = peek_magic(reader.as_mut())?;
+    // Enforce the fast path's read budget at the reader level: the magic
+    // peek plus the registry probe may consume at most
+    // [`PING_FORMAT_MAX_READ_BYTES`](crate::PING_FORMAT_MAX_READ_BYTES)
+    // in total; anything past that is a contract violation and fails.
+    let mut reader = crate::probe::BoundedReader::new(
+        src.into_read_seek(ctx)?,
+        crate::PING_FORMAT_MAX_READ_BYTES,
+    );
+    let reader: &mut dyn ReadSeek = &mut reader;
+    let magic = peek_magic(reader)?;
 
     if is_pdf(&magic, ext.as_deref()) {
         return Ok(PingFormat {
@@ -300,7 +308,7 @@ pub fn ping_format_with(
     // container fails fast).
     let cname = ctx
         .containers
-        .probe_input(reader.as_mut(), ext.as_deref())
+        .probe_input(reader, ext.as_deref())
         .map_err(|e| Error::probe(e.to_string()))?;
     if !permitted(&cname, &opts.allow_containers, &opts.deny_containers) {
         return Err(Error::restricted(format!(
