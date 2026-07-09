@@ -116,6 +116,35 @@ pub struct StreamInfo {
     pub duration_secs: Option<f64>,
 }
 
+impl StreamInfo {
+    /// Pixel dimensions as one pair, when the container advertises both.
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        Some((self.width?, self.height?))
+    }
+
+    /// The stream duration as a [`std::time::Duration`], when advertised
+    /// and non-negative.
+    pub fn duration(&self) -> Option<std::time::Duration> {
+        std::time::Duration::try_from_secs_f64(self.duration_secs?).ok()
+    }
+
+    /// True for a video-kind stream (which includes single-frame still
+    /// images — see [`MediaKind`]).
+    pub fn is_video(&self) -> bool {
+        self.kind == StreamKind::Video
+    }
+
+    /// True for an audio-kind stream.
+    pub fn is_audio(&self) -> bool {
+        self.kind == StreamKind::Audio
+    }
+
+    /// True for a subtitle / timed-text stream.
+    pub fn is_subtitle(&self) -> bool {
+        self.kind == StreamKind::Subtitle
+    }
+}
+
 /// The result of [`probe`](crate::probe) / [`probe_with`](crate::probe_with):
 /// a source's broad kind, its detected container, overall size / duration
 /// / metadata, and a per-stream summary — all obtained without a full
@@ -142,6 +171,67 @@ pub struct Probe {
     pub metadata: Vec<(String, String)>,
     /// Per-stream summary. Empty for the eager PDF / 3D paths.
     pub streams: Vec<StreamInfo>,
+}
+
+impl Probe {
+    /// Iterate the video-kind streams (still images included).
+    pub fn video_streams(&self) -> impl Iterator<Item = &StreamInfo> {
+        self.streams.iter().filter(|s| s.is_video())
+    }
+
+    /// Iterate the audio-kind streams.
+    pub fn audio_streams(&self) -> impl Iterator<Item = &StreamInfo> {
+        self.streams.iter().filter(|s| s.is_audio())
+    }
+
+    /// Iterate the subtitle-kind streams.
+    pub fn subtitle_streams(&self) -> impl Iterator<Item = &StreamInfo> {
+        self.streams.iter().filter(|s| s.is_subtitle())
+    }
+
+    /// The first video-kind stream, if any — for a still image this is
+    /// *the* image stream.
+    pub fn first_video(&self) -> Option<&StreamInfo> {
+        self.video_streams().next()
+    }
+
+    /// The first audio-kind stream, if any.
+    pub fn first_audio(&self) -> Option<&StreamInfo> {
+        self.audio_streams().next()
+    }
+
+    /// True when at least one video-kind stream is present.
+    pub fn has_video(&self) -> bool {
+        self.first_video().is_some()
+    }
+
+    /// True when at least one audio-kind stream is present.
+    pub fn has_audio(&self) -> bool {
+        self.first_audio().is_some()
+    }
+
+    /// The overall duration as a [`std::time::Duration`], when known and
+    /// non-negative.
+    pub fn duration(&self) -> Option<std::time::Duration> {
+        std::time::Duration::try_from_secs_f64(self.duration_secs?).ok()
+    }
+
+    /// Look up a container-level metadata value by key,
+    /// case-insensitively (containers disagree on tag-key casing —
+    /// `TITLE` / `Title` / `title` all name the same tag). Returns the
+    /// first match in container order.
+    pub fn meta(&self, key: &str) -> Option<&str> {
+        self.metadata
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The pixel dimensions of the first video-kind stream, when
+    /// advertised — the "what size is this image/video?" one-liner.
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        self.video_streams().find_map(|s| s.dimensions())
+    }
 }
 
 /// File extensions that route to the 3D decode path.
@@ -313,6 +403,83 @@ mod tests {
         assert_eq!(p.clone(), p);
         assert_eq!(p.streams[0].kind, StreamKind::Video);
         assert_eq!(p.metadata[0].0, "title");
+    }
+
+    fn stream(kind: StreamKind, index: u32) -> StreamInfo {
+        StreamInfo {
+            index,
+            kind,
+            codec: "x".to_string(),
+            width: None,
+            height: None,
+            sample_rate: None,
+            channels: None,
+            bit_rate: None,
+            duration_secs: None,
+        }
+    }
+
+    #[test]
+    fn probe_accessors_filter_by_kind() {
+        let mut video = stream(StreamKind::Video, 0);
+        video.width = Some(320);
+        video.height = Some(240);
+        video.duration_secs = Some(2.5);
+        let audio = stream(StreamKind::Audio, 1);
+        let sub = stream(StreamKind::Subtitle, 2);
+        let p = Probe {
+            kind: MediaKind::Media,
+            container: Some("x".to_string()),
+            byte_size: Some(1),
+            duration_secs: Some(2.5),
+            metadata: vec![
+                ("TITLE".to_string(), "demo".to_string()),
+                ("artist".to_string(), "me".to_string()),
+            ],
+            streams: vec![video, audio, sub],
+        };
+        assert!(p.has_video() && p.has_audio());
+        assert_eq!(p.video_streams().count(), 1);
+        assert_eq!(p.audio_streams().count(), 1);
+        assert_eq!(p.subtitle_streams().count(), 1);
+        assert_eq!(p.first_video().unwrap().index, 0);
+        assert_eq!(p.first_audio().unwrap().index, 1);
+        assert_eq!(p.dimensions(), Some((320, 240)));
+        assert_eq!(p.duration(), Some(std::time::Duration::from_millis(2500)));
+        // Case-insensitive metadata lookup, first match wins.
+        assert_eq!(p.meta("title"), Some("demo"));
+        assert_eq!(p.meta("ARTIST"), Some("me"));
+        assert_eq!(p.meta("album"), None);
+        // Stream-level helpers.
+        let v = p.first_video().unwrap();
+        assert!(v.is_video() && !v.is_audio() && !v.is_subtitle());
+        assert_eq!(v.dimensions(), Some((320, 240)));
+        assert_eq!(v.duration(), Some(std::time::Duration::from_millis(2500)));
+    }
+
+    #[test]
+    fn accessors_handle_absent_fields() {
+        let p = Probe {
+            kind: MediaKind::Scene,
+            container: None,
+            byte_size: None,
+            duration_secs: None,
+            metadata: Vec::new(),
+            streams: Vec::new(),
+        };
+        assert!(!p.has_video() && !p.has_audio());
+        assert_eq!(p.first_video(), None);
+        assert_eq!(p.dimensions(), None);
+        assert_eq!(p.duration(), None);
+        assert_eq!(p.meta("title"), None);
+
+        // A width-only stream has no dimensions; a negative duration
+        // (nonsense from a hostile container) never becomes a Duration.
+        let mut s = stream(StreamKind::Video, 0);
+        s.width = Some(64);
+        s.duration_secs = Some(-1.0);
+        assert_eq!(s.dimensions(), None);
+        assert_eq!(s.duration(), None);
     }
 
     #[test]
