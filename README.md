@@ -81,6 +81,16 @@ pub struct PingFormat {
 }
 ```
 
+The fast path's cheapness is a **hard, enforced contract**, not a
+courtesy: `ping_format` never reads more than
+`PING_FORMAT_MAX_READ_BYTES` (257 KiB — a 1 KiB magic peek plus the
+registry's fixed 256 KiB probe window, both taken from the *start* of
+the source). The source is wrapped in a metering reader that fails any
+read past the budget, so a misbehaving probe can never turn ping into a
+whole-file scan. A caller-supplied `Source::Reader` is probed from
+byte 0 regardless of its current position and handed back at the
+position it went in at.
+
 ### `probe()` — full probe (size / duration / streams)
 
 When you want detail — overall byte size, duration, container metadata,
@@ -127,6 +137,27 @@ Each `StreamInfo` carries `index`, `kind` (`StreamKind::{Audio, Video,
 Subtitle, Data, Unknown}`), the `codec` id, and whatever the container
 advertises cheaply (`width` / `height` / `sample_rate` / `channels` /
 `bit_rate` / `duration_secs`).
+
+Typed accessors cover the common questions without manual stream
+iteration:
+
+```rust
+let info = oxideav_io::probe("clip.mkv")?;
+if info.has_video() {
+    println!("size: {:?}", info.dimensions());          // first video stream's (w, h)
+}
+for a in info.audio_streams() {
+    println!("audio #{}: {} {:?} Hz", a.index, a.codec, a.sample_rate);
+}
+println!("title: {:?}", info.meta("title"));            // case-insensitive tag lookup
+println!("length: {:?}", info.duration());              // std::time::Duration
+# Ok::<(), oxideav_io::Error>(())
+```
+
+(`video_streams()` / `subtitle_streams()`, `first_video()` /
+`first_audio()`, `has_audio()`, and per-stream `dimensions()` /
+`duration()` / `is_video()` / `is_audio()` / `is_subtitle()` round out
+the set.)
 
 The discrimination ladder mirrors `open()`:
 
@@ -205,6 +236,26 @@ an `Unsupported` error today.
 * `Source::Bytes(b)` — an in-memory buffer;
 * `Source::Reader(r)` — any `Read + Seek + Send` you already hold.
 
+### Seekability contract
+
+Every source shape resolves to a **seekable** byte stream — that is the
+facade's I/O contract, and it is what format detection is built on:
+
+* probing always inspects the **start** of the stream: the facade seeks
+  to byte 0, reads its window, and **restores the cursor** to wherever
+  it was when the source was handed in;
+* `probe()` measures `byte_size` by seeking to the end (and seeking
+  back), and its demuxer header parse may seek anywhere the container
+  keeps its stream table;
+* only `SourceRegistry` outputs that are byte-shaped (seekable) are
+  accepted through `Source::Uri`; packet/frame/multi-title sources are
+  rejected with a typed `Unsupported` error.
+
+A truly non-seekable stream (a socket, a pipe) must be buffered by the
+caller first — `Source::Bytes` on the collected bytes is the supported
+path. In exchange, every guarantee above holds for *any* reader you
+hand in, parked at *any* position.
+
 ## Features
 
 | Feature    | Default | Effect |
@@ -231,9 +282,15 @@ resolve; inside the workspace it always resolves via `[patch.crates-io]`.
 ## Status
 
 The **read** facade (Phase 1), the **write** facade (Phase 2), and the
-still-image **transcode** path (Phase 3) are all in place. The remaining
-follow-up is the audio/video transcode path on top of `oxideav-pipeline`
-(decode → filter graph → encode → mux).
+still-image **transcode** path (Phase 3) are all in place. The
+**probe** subsystem is contract-hardened: an enforced `ping_format`
+read budget, a fixture-backed coverage matrix (PNG / JPEG / PBM / DDS /
+WAV / AVI / Matroska / MP3 / SRT / WebVTT / Y4M / SVG / PDF / STL —
+both tiers pinned to agree), and a misdetection-hardening suite
+(truncation sweeps, ambiguous magics, garbage fuzz — typed errors,
+never panics). The remaining follow-up is the audio/video transcode
+path on top of `oxideav-pipeline` (decode → filter graph → encode →
+mux).
 
 ## License
 

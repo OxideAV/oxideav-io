@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Enforced `ping_format` read budget.** New public constant
+  `PING_FORMAT_MAX_READ_BYTES` (257 KiB = 1 KiB magic peek + the
+  registry's fixed 256 KiB probe window). The fast path now wraps the
+  source in a metering reader that *fails* any read past the budget, so
+  the "ping is cheap" promise holds even if a future probe
+  implementation overreaches. Contract pinned by tests: bounded I/O on
+  multi-MiB inputs (also when detection fails), no demuxer is ever
+  opened (a valid signature with a corrupt body still pings), and a
+  caller-supplied reader is probed from byte 0 and handed back at its
+  original position.
+- **Typed accessors on `Probe` / `StreamInfo`.**
+  `video_streams()` / `audio_streams()` / `subtitle_streams()`,
+  `first_video()` / `first_audio()`, `has_video()` / `has_audio()`,
+  `dimensions()` (first video stream's advertised size), `duration()`
+  (a `std::time::Duration`; negative / non-finite advertised values are
+  rejected), and `meta(key)` — case-insensitive container-tag lookup.
+  `StreamInfo` adds `dimensions()`, `duration()`, and `is_video()` /
+  `is_audio()` / `is_subtitle()`.
+- **Fixture-backed probe coverage matrix** (tests): PNG / JPEG / PBM /
+  DDS (via the save path), PCM→AVI / PCM→Matroska / FLAC→Matroska /
+  raw MP3 (via registry encoders + muxers), WAV / Y4M / SRT / WebVTT /
+  SVG (hand-rolled minimal fixtures), plus the eager PDF (Scene) and
+  STL (Mesh) rungs — each row pins the detected format (both tiers must
+  agree), stream counts/kinds, payload codec ids, and advertised
+  dimensions / rates / bit rates / durations.
+- **Misdetection hardening** (tests): zero-byte / single-byte inputs,
+  plain prose, truncated & ambiguous magics, per-byte truncation sweeps
+  of facade-produced PNG/JPEG, contradictory extension hints, and
+  deterministic garbage buffers all come back as typed errors or honest
+  detections — never panics.
+
 - **Two-tier format-probe API.** Identify a source **without a full
   decode**, at two levels of detail.
   - **Fast path** — `ping_format_with(ctx, Source, &OpenOptions)` (lean)
@@ -33,6 +64,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (separating image-vs-1-frame-video needs a decode, which probe
     avoids). Both tiers honour the same `allow_*`/`deny_*` lists as the
     openers.
+
+### Fixed
+
+- **`PixelChoice::Auto` now walks an encoder-capability candidate
+  ladder.** It previously consulted the accepted-format sets of *every*
+  implementation of the codec (decoders included) and treated an empty
+  capability set as "RGBA is fine", so saving to JPEG with the default
+  options failed at `send_frame` (the MJPEG encoder only takes RGB24).
+  `Auto` now consults encoder implementations only and retries the
+  encode per candidate (declared formats alpha-first, then RGBA /
+  RGB24 fallbacks). Explicit `Rgb` / `Rgba` choices still yield exactly
+  one candidate and fail loudly instead of silently re-packing.
+- **Saving to the `y4m` container derives the `rawvideo` payload
+  codec** instead of the nonexistent codec id `y4m`. (The registry has
+  no `rawvideo` *encoder* yet, so the save still fails — but it now
+  asks for the right codec, so the path lights up the moment one is
+  registered.)
 
 ## [0.0.1](https://github.com/OxideAV/oxideav-io/releases/tag/v0.0.1) - 2026-06-15
 
