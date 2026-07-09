@@ -299,7 +299,7 @@ impl XorShift64 {
 
 #[test]
 fn garbage_buffers_never_panic_the_dispatcher() {
-    let mut rng = XorShift64(0x0A11_D0_1D_CAFE_F00D);
+    let mut rng = XorShift64(0x0A11_D01D_CAFE_F00D);
     let exts = [None, Some("png"), Some("wav"), Some("mkv"), Some("srt")];
     for round in 0..192 {
         let len = (rng.next() % 2048) as usize;
