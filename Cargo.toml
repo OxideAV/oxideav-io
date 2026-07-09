@@ -77,7 +77,7 @@ oxideav-image-filter = { version = "0.1", optional = true }
 # the workspace's pure aggregator and is never a hard dependency here.
 oxideav-meta = { version = "0.0", optional = true }
 # Eager PDF + Scene types (behind `pdf`).
-oxideav-pdf = { version = "0.1", optional = true }
+oxideav-pdf = { version = "0.2", optional = true }
 oxideav-scene = { version = "0.1", optional = true }
 # Eager 3D types + decoder registry (behind `mesh`).
 oxideav-mesh3d = { version = "0.0", optional = true }
