@@ -22,8 +22,8 @@ use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 
 use oxideav_core::{
-    CodecId, CodecParameters, Frame, MediaType, PixelFormat, RuntimeContext, StreamInfo, TimeBase,
-    VideoFrame, VideoPlane,
+    CodecId, CodecParameters, Frame, MediaType, Packet, PixelFormat, RuntimeContext, StreamInfo,
+    TimeBase, VideoFrame, VideoPlane,
 };
 use oxideav_pixfmt::{convert as pix_convert, ConvertOptions, FrameInfo};
 
@@ -117,10 +117,12 @@ impl Seek for SharedCursor {
 
 /// Default codec id for a container whose muxer expects a codec whose id
 /// differs from the container name (the common image case is `1:1`, but
-/// JPEG's container is `"jpeg"` while its codec is `"mjpeg"`).
+/// JPEG's container is `"jpeg"` while its codec is `"mjpeg"`, and Y4M is
+/// a raw-frame container whose payload codec is `"rawvideo"`).
 fn default_codec_for_container(container: &str) -> &str {
     match container {
         "jpeg" => "mjpeg",
+        "y4m" => "rawvideo",
         other => other,
     }
 }
@@ -179,32 +181,55 @@ fn resolve_container(ctx: &RuntimeContext, sink: &Sink, opts: &SaveOptions) -> R
         })
 }
 
-/// Pick the packed pixel format the encoder should receive, honouring an
-/// explicit [`PixelChoice`] and otherwise consulting the codec's
-/// accepted-format set.
-fn choose_pixel_format(
+/// Pick the packed pixel format candidates the encoder should receive,
+/// in attempt order, honouring an explicit [`PixelChoice`] and otherwise
+/// consulting the codec's **encoder** capability set.
+///
+/// An explicit choice yields exactly one candidate (the caller asked for
+/// it; failing loudly beats silently re-packing). `Auto` yields a
+/// preference ladder: declared accepted formats first (alpha-capable
+/// preferred), then the RGBA → RGB24 fallbacks — because a capability
+/// set is advisory (an empty set means "unspecified", and some encoders
+/// only reject a format at `send_frame` time), the save path tries each
+/// candidate in turn.
+fn pixel_format_candidates(
     ctx: &RuntimeContext,
     codec_id: &CodecId,
     choice: PixelChoice,
-) -> PixelFormat {
+) -> Vec<PixelFormat> {
     match choice {
-        PixelChoice::Rgb => PixelFormat::Rgb24,
-        PixelChoice::Rgba => PixelFormat::Rgba,
+        PixelChoice::Rgb => vec![PixelFormat::Rgb24],
+        PixelChoice::Rgba => vec![PixelFormat::Rgba],
         PixelChoice::Auto => {
-            // Read the codec's accepted set; prefer RGBA, then RGB24,
-            // then whatever the codec lists first, falling back to RGBA.
-            let impls = ctx.codecs.implementations(codec_id);
-            let accepted: Vec<PixelFormat> = impls
+            // Only encoder implementations matter here — a decoder's
+            // accepted set says nothing about what we may feed in.
+            let accepted: Vec<PixelFormat> = ctx
+                .codecs
+                .implementations(codec_id)
                 .iter()
+                .filter(|i| i.make_encoder.is_some())
                 .flat_map(|i| i.caps.accepted_pixel_formats.iter().copied())
                 .collect();
-            if accepted.is_empty() || accepted.contains(&PixelFormat::Rgba) {
-                PixelFormat::Rgba
-            } else if accepted.contains(&PixelFormat::Rgb24) {
-                PixelFormat::Rgb24
-            } else {
-                accepted[0]
+            let mut candidates = Vec::new();
+            let mut push = |f: PixelFormat| {
+                if !candidates.contains(&f) {
+                    candidates.push(f);
+                }
+            };
+            // Declared formats, alpha-capable first.
+            if accepted.contains(&PixelFormat::Rgba) {
+                push(PixelFormat::Rgba);
             }
+            if accepted.contains(&PixelFormat::Rgb24) {
+                push(PixelFormat::Rgb24);
+            }
+            for f in accepted {
+                push(f);
+            }
+            // Universal fallbacks for advisory/empty capability sets.
+            push(PixelFormat::Rgba);
+            push(PixelFormat::Rgb24);
+            candidates
         }
     }
 }
@@ -232,20 +257,17 @@ fn image_to_frame(img: &RgbaImage, dst: PixelFormat) -> Result<VideoFrame> {
     Ok(converted)
 }
 
-/// Encode + mux a still image to the sink.
-fn save_image(ctx: &RuntimeContext, img: &RgbaImage, sink: Sink, opts: &SaveOptions) -> Result<()> {
-    if img.width == 0 || img.height == 0 {
-        return Err(Error::invalid("save: cannot encode a zero-sized image"));
-    }
-
-    let container = resolve_container(ctx, &sink, opts)?;
-    let codec_name = opts
-        .codec
-        .clone()
-        .unwrap_or_else(|| default_codec_for_container(&container).to_string());
-    let codec_id = CodecId::new(codec_name);
-
-    let dst = choose_pixel_format(ctx, &codec_id, opts.pixel);
+/// Run one encode attempt in a fixed pixel format: convert the image,
+/// build the encoder, feed the single frame, and drain the packets.
+/// Returns the packets plus the encoder's output parameters (which carry
+/// the wire tag / codec id the muxer needs to recognise the stream).
+fn encode_image(
+    ctx: &RuntimeContext,
+    img: &RgbaImage,
+    codec_id: &CodecId,
+    dst: PixelFormat,
+    quality: Option<u8>,
+) -> Result<(Vec<Packet>, CodecParameters)> {
     let frame = image_to_frame(img, dst)?;
 
     // Build the encoder parameters. Quality is advisory — codecs that
@@ -254,7 +276,7 @@ fn save_image(ctx: &RuntimeContext, img: &RgbaImage, sink: Sink, opts: &SaveOpti
     params.width = Some(img.width);
     params.height = Some(img.height);
     params.pixel_format = Some(dst);
-    if let Some(q) = opts.quality {
+    if let Some(q) = quality {
         params.options = params.options.set("quality", q.min(100).to_string());
     }
 
@@ -278,10 +300,45 @@ fn save_image(ctx: &RuntimeContext, img: &RgbaImage, sink: Sink, opts: &SaveOpti
             "save: encoder produced no packets for the image".into(),
         ));
     }
+    Ok((packets, encoder.output_params().clone()))
+}
 
-    // The encoder's output params carry the wire tag / codec id the
-    // muxer needs to recognise the stream.
-    let mut out_params = encoder.output_params().clone();
+/// Encode + mux a still image to the sink.
+fn save_image(ctx: &RuntimeContext, img: &RgbaImage, sink: Sink, opts: &SaveOptions) -> Result<()> {
+    if img.width == 0 || img.height == 0 {
+        return Err(Error::invalid("save: cannot encode a zero-sized image"));
+    }
+
+    let container = resolve_container(ctx, &sink, opts)?;
+    let codec_name = opts
+        .codec
+        .clone()
+        .unwrap_or_else(|| default_codec_for_container(&container).to_string());
+    let codec_id = CodecId::new(codec_name);
+
+    // Try each pixel-format candidate in preference order (exactly one
+    // for an explicit PixelChoice; a ladder for Auto — capability sets
+    // are advisory, so an encoder may only reject a format at
+    // send_frame time and the next candidate has to step in).
+    let candidates = pixel_format_candidates(ctx, &codec_id, opts.pixel);
+    let mut attempt: Option<(Vec<Packet>, CodecParameters)> = None;
+    let mut last_err: Option<Error> = None;
+    for dst in candidates {
+        match encode_image(ctx, img, &codec_id, dst, opts.quality) {
+            Ok(ok) => {
+                attempt = Some(ok);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let (packets, mut out_params) = match attempt {
+        Some(ok) => ok,
+        None => {
+            return Err(last_err
+                .unwrap_or_else(|| Error::invalid("save: no pixel-format candidate to encode")))
+        }
+    };
     out_params.media_type = MediaType::Video;
     let time_base = TimeBase::new(1, 100);
     let stream = StreamInfo {
@@ -420,6 +477,65 @@ mod tests {
         save_with(&c, &opened, Sink::Buffer(&mut buf), &opts).expect("save JPEG");
         // SOI marker.
         assert_eq!(&buf[0..2], &[0xFF, 0xD8], "JPEG should start with SOI");
+    }
+
+    #[test]
+    fn save_jpeg_with_auto_pixel_choice_falls_back_to_rgb() {
+        // Regression: the MJPEG encoder only accepts RGB24, but its
+        // capability set is advisory — PixelChoice::Auto used to pick
+        // RGBA and fail at send_frame. Auto must now walk its candidate
+        // ladder and land on RGB24 by itself.
+        let c = ctx();
+        let opened = Opened::Image(sample_image());
+        let mut buf = Vec::new();
+        let opts = SaveOptions {
+            container: Some("jpeg".into()),
+            ..SaveOptions::default() // pixel: PixelChoice::Auto
+        };
+        save_with(&c, &opened, Sink::Buffer(&mut buf), &opts).expect("save JPEG with Auto pixel");
+        assert_eq!(&buf[0..2], &[0xFF, 0xD8], "JPEG should start with SOI");
+    }
+
+    #[test]
+    fn save_y4m_derives_rawvideo_codec() {
+        // Regression: the Y4M container's payload codec is "rawvideo";
+        // deriving the codec id from the container name produced the
+        // nonexistent codec "y4m". The registry has no rawvideo
+        // *encoder* yet, so the save still fails — but it must now fail
+        // asking for the *right* codec, so the moment the fleet grows a
+        // rawvideo encoder this path lights up. (When it does, this
+        // test should become a full save → probe roundtrip.)
+        let c = ctx();
+        let opened = Opened::Image(sample_image());
+        let mut buf = Vec::new();
+        let opts = SaveOptions {
+            container: Some("y4m".into()),
+            ..SaveOptions::default()
+        };
+        let res = save_with(&c, &opened, Sink::Buffer(&mut buf), &opts);
+        match res {
+            Err(Error::Decode(msg)) => assert!(
+                msg.contains("'rawvideo'"),
+                "the derived codec must be rawvideo, got: {msg}"
+            ),
+            other => panic!("expected a rawvideo encoder-not-found error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_pixel_choice_does_not_fall_back() {
+        // An explicit choice the encoder can't take must fail loudly,
+        // not silently re-pack: MJPEG + forced RGBA is an error.
+        let c = ctx();
+        let opened = Opened::Image(sample_image());
+        let mut buf = Vec::new();
+        let opts = SaveOptions {
+            container: Some("jpeg".into()),
+            pixel: PixelChoice::Rgba,
+            ..SaveOptions::default()
+        };
+        let res = save_with(&c, &opened, Sink::Buffer(&mut buf), &opts);
+        assert!(res.is_err(), "forced RGBA into MJPEG must error: {res:?}");
     }
 
     #[test]
