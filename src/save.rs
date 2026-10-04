@@ -229,6 +229,12 @@ fn pixel_format_candidates(
             // Universal fallbacks for advisory/empty capability sets.
             push(PixelFormat::Rgba);
             push(PixelFormat::Rgb24);
+            // Planar fallbacks for raw-frame containers that only carry
+            // YUV / grey (Y4M); a muxer that rejects the packed layouts
+            // steps the ladder down to these.
+            push(PixelFormat::Yuv444P);
+            push(PixelFormat::Yuv420P);
+            push(PixelFormat::Gray8);
             candidates
         }
     }
@@ -319,54 +325,62 @@ fn save_image(ctx: &RuntimeContext, img: &RgbaImage, sink: Sink, opts: &SaveOpti
     // Try each pixel-format candidate in preference order (exactly one
     // for an explicit PixelChoice; a ladder for Auto — capability sets
     // are advisory, so an encoder may only reject a format at
-    // send_frame time and the next candidate has to step in).
+    // send_frame time, and a raw-frame muxer may reject a layout it
+    // cannot express, so either failure steps to the next candidate).
+    //
+    // The container is assembled in memory (via a SharedCursor whose
+    // bytes we can reclaim) so a seekable muxer works over a
+    // non-seekable sink; the finished buffer is committed afterwards.
     let candidates = pixel_format_candidates(ctx, &codec_id, opts.pixel);
-    let mut attempt: Option<(Vec<Packet>, CodecParameters)> = None;
+    let time_base = TimeBase::new(1, 100);
+    let mut written: Option<SharedCursor> = None;
     let mut last_err: Option<Error> = None;
     for dst in candidates {
-        match encode_image(ctx, img, &codec_id, dst, opts.quality) {
-            Ok(ok) => {
-                attempt = Some(ok);
-                break;
+        let (packets, mut out_params) = match encode_image(ctx, img, &codec_id, dst, opts.quality) {
+            Ok(ok) => ok,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
             }
-            Err(e) => last_err = Some(e),
+        };
+        out_params.media_type = MediaType::Video;
+        let stream = StreamInfo {
+            index: 0,
+            time_base,
+            duration: Some(packets.len() as i64),
+            start_time: Some(0),
+            params: out_params,
+        };
+        let cursor = SharedCursor::new();
+        let mut muxer = match ctx.containers.open_muxer(
+            &container,
+            Box::new(cursor.clone()),
+            std::slice::from_ref(&stream),
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                last_err = Some(Error::Decode(format!(
+                    "save: cannot open muxer '{container}' for {dst:?}: {e}"
+                )));
+                continue;
+            }
+        };
+        muxer.write_header()?;
+        for pkt in &packets {
+            muxer.write_packet(pkt)?;
         }
+        muxer.write_trailer()?;
+        drop(muxer);
+        written = Some(cursor);
+        break;
     }
-    let (packets, mut out_params) = match attempt {
-        Some(ok) => ok,
+    let cursor = match written {
+        Some(c) => c,
         None => {
             return Err(last_err
                 .unwrap_or_else(|| Error::invalid("save: no pixel-format candidate to encode")))
         }
     };
-    out_params.media_type = MediaType::Video;
-    let time_base = TimeBase::new(1, 100);
-    let stream = StreamInfo {
-        index: 0,
-        time_base,
-        duration: Some(packets.len() as i64),
-        start_time: Some(0),
-        params: out_params,
-    };
-
-    // Assemble the container in memory (via a SharedCursor whose bytes
-    // we can reclaim) so a seekable muxer works over a non-seekable
-    // sink, then commit the finished buffer.
-    let cursor = SharedCursor::new();
-    let mut muxer = ctx
-        .containers
-        .open_muxer(
-            &container,
-            Box::new(cursor.clone()),
-            std::slice::from_ref(&stream),
-        )
-        .map_err(|e| Error::Decode(format!("save: cannot open muxer '{container}': {e}")))?;
-    muxer.write_header()?;
-    for pkt in &packets {
-        muxer.write_packet(pkt)?;
-    }
-    muxer.write_trailer()?;
-    drop(muxer);
 
     let bytes = cursor.into_bytes();
     if bytes.is_empty() {
@@ -497,14 +511,12 @@ mod tests {
     }
 
     #[test]
-    fn save_y4m_derives_rawvideo_codec() {
-        // Regression: the Y4M container's payload codec is "rawvideo";
-        // deriving the codec id from the container name produced the
-        // nonexistent codec "y4m". The registry has no rawvideo
-        // *encoder* yet, so the save still fails — but it must now fail
-        // asking for the *right* codec, so the moment the fleet grows a
-        // rawvideo encoder this path lights up. (When it does, this
-        // test should become a full save → probe roundtrip.)
+    fn save_y4m_round_trips_through_rawvideo() {
+        // The Y4M container's payload codec is "rawvideo" (deriving the
+        // codec id from the container name once produced the nonexistent
+        // codec "y4m"). Y4M cannot carry RGBA, so the save ladder must
+        // step past the packed layouts the rawvideo encoder accepts to a
+        // colorspace the muxer can express.
         let c = ctx();
         let opened = Opened::Image(sample_image());
         let mut buf = Vec::new();
@@ -512,14 +524,33 @@ mod tests {
             container: Some("y4m".into()),
             ..SaveOptions::default()
         };
-        let res = save_with(&c, &opened, Sink::Buffer(&mut buf), &opts);
-        match res {
-            Err(Error::Decode(msg)) => assert!(
-                msg.contains("'rawvideo'"),
-                "the derived codec must be rawvideo, got: {msg}"
+        match save_with(&c, &opened, Sink::Buffer(&mut buf), &opts) {
+            Ok(()) => {}
+            // Until a rawvideo *encoder* is published the save fails —
+            // but it must fail asking for the right codec.
+            Err(Error::Decode(msg)) if msg.contains("'rawvideo'") => return,
+            other => panic!(
+                "expected a Y4M round trip or a rawvideo encoder-not-found error, got {other:?}"
             ),
-            other => panic!("expected a rawvideo encoder-not-found error, got {other:?}"),
         }
+        assert!(
+            buf.starts_with(b"YUV4MPEG2 "),
+            "Y4M stream must start with its signature"
+        );
+        let header_end = buf.iter().position(|&b| b == b'\n').expect("header line");
+        let header = std::str::from_utf8(&buf[..header_end]).unwrap();
+        assert!(
+            header.contains(" W2 ") && header.contains(" H2 "),
+            "header carries the 2x2 geometry: {header}"
+        );
+        assert!(
+            header.contains(" C444") || header.contains(" C420") || header.contains(" Cmono"),
+            "header names a colorspace the muxer can express: {header}"
+        );
+        assert!(
+            buf[header_end + 1..].starts_with(b"FRAME"),
+            "one FRAME follows the header"
+        );
     }
 
     #[test]
