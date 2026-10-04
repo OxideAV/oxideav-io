@@ -74,7 +74,7 @@ println!("{:?} / {:?}", p.kind, p.format); // e.g. Media / Some("matroska")
 # Ok::<(), oxideav_io::Error>(())
 ```
 
-```rust
+```rust,ignore
 pub struct PingFormat {
     pub kind: MediaKind,        // Scene | Mesh | Media
     pub format: Option<String>, // "pdf", "stl", "matroska", "png", …
@@ -122,7 +122,7 @@ match info.kind {
 
 `probe()` returns a `Probe`:
 
-```rust
+```rust,ignore
 pub struct Probe {
     pub kind: MediaKind,                 // Scene | Mesh | Media
     pub container: Option<String>,       // e.g. "png", "matroska"; None for PDF/3D
