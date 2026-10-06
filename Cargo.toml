@@ -28,7 +28,7 @@ default = ["full"]
 # populated `oxideav_core::RuntimeContext` and uses the `*_with(ctx, …)`
 # functions. No `oxideav-meta` dependency, so the dep tree stays lean and
 # resolves cleanly from crates.io.
-registry = ["dep:oxideav-core", "dep:oxideav-pixfmt"]
+registry = ["dep:oxideav-core", "dep:oxideav-image"]
 
 # Zero-config convenience: pulls `oxideav-meta` so the no-context
 # `open(path)` / `save(opened, path)` helpers can lazily build and cache
@@ -40,7 +40,7 @@ full = ["registry", "dep:oxideav-meta", "pdf", "mesh", "transforms"]
 
 # Still-image transforms for the transcode facade (today: `Resize`).
 # Pulls `oxideav-image-filter`. Without it, `Transform::Resize` errors
-# but `Transform::Convert` (pixel-format only, via `oxideav-pixfmt`)
+# but `Transform::Convert` (pixel-format only, via `oxideav-image`)
 # still works.
 transforms = ["registry", "dep:oxideav-image-filter"]
 
@@ -66,10 +66,12 @@ mesh = [
 # RuntimeContext we orchestrate. Optional + behind `registry` so a
 # future standalone slice of this crate can drop the framework.
 oxideav-core = { version = "0.1", optional = true }
-# Pixel-format conversion used by `open_rgb` / `open_rgba` to collapse a
-# decoded `VideoFrame` (in whatever native format) to packed RGB24 /
-# RGBA8888.
-oxideav-pixfmt = { version = "0.1", optional = true }
+# The image gateway (Layer 2 of IMAGE_CRATE_API.md). Every still-image
+# decode, pixel-layout conversion, encode and mux in this crate goes
+# through it; `oxideav_image::Image` is part of this crate's public API
+# (`open_image*`, `RgbaImage` conversions), hence the versioned line.
+# `"0.0"` resolves any published 0.0.x.
+oxideav-image = { version = "0.0", optional = true }
 # Still-image transforms (Resize) for the transcode facade. Behind the
 # `transforms` feature so the lean `registry` build stays free of it.
 oxideav-image-filter = { version = "0.1", optional = true }

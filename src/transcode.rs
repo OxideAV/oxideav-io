@@ -1,14 +1,14 @@
 //! The transcode facade: read a [`Source`], optionally apply a chain of
 //! still-image [`Transform`]s, and write the result to a [`Sink`].
 //!
-//! This round wires the **still-image** path end-to-end
-//! (decode → convert / resize → encode → mux). The audio/video pipeline
-//! path (decode → filter graph → encode → mux, built on
+//! The **still-image** path is wired end-to-end (decode → convert /
+//! resize → encode → mux), with the decode, the layout conversions and
+//! the encode riding the `oxideav-image` gateway. The audio/video
+//! pipeline path (decode → filter graph → encode → mux, built on
 //! `oxideav-pipeline`) is the documented next step — [`transcode_with`]
 //! returns [`Error::Unsupported`] for a non-image input today.
 
-use oxideav_core::{PixelFormat, RuntimeContext, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert as pix_convert, ConvertOptions, FrameInfo};
+use oxideav_core::{PixelFormat, RuntimeContext};
 
 use crate::error::{Error, Result};
 use crate::image::RgbaImage;
@@ -79,7 +79,8 @@ fn apply_transform(img: &RgbaImage, t: &Transform) -> Result<RgbaImage> {
     }
 }
 
-/// Re-pack an image into the requested packed layout via `oxideav-pixfmt`.
+/// Re-pack an image into the requested packed layout through the
+/// gateway's `Image::to_format` (`oxideav-pixfmt` underneath).
 fn convert_image(img: &RgbaImage, choice: PixelChoice) -> Result<RgbaImage> {
     let dst = match choice {
         PixelChoice::Rgb => PixelFormat::Rgb24,
@@ -87,88 +88,25 @@ fn convert_image(img: &RgbaImage, choice: PixelChoice) -> Result<RgbaImage> {
         PixelChoice::Auto if img.is_rgb() => PixelFormat::Rgb24,
         PixelChoice::Auto | PixelChoice::Rgba => PixelFormat::Rgba,
     };
-    let src_format = if img.is_rgb() {
-        PixelFormat::Rgb24
-    } else {
-        PixelFormat::Rgba
-    };
-    if src_format == dst {
+    if img.pixel_format() == dst {
         return Ok(img.clone());
     }
-    let frame = VideoFrame {
-        pts: Some(0),
-        planes: vec![VideoPlane {
-            stride: img.stride,
-            data: img.pixels.clone(),
-        }],
-    };
-    let info = FrameInfo::new(src_format, img.width, img.height);
-    let out = pix_convert(&frame, info, dst, &ConvertOptions::default())?;
-    frame_to_image(&out, img.width, img.height, dst)
-}
-
-/// Pack a converted (possibly stride-padded) frame back into a tight
-/// [`RgbaImage`].
-fn frame_to_image(
-    frame: &VideoFrame,
-    width: u32,
-    height: u32,
-    dst: PixelFormat,
-) -> Result<RgbaImage> {
-    let bpp = match dst {
-        PixelFormat::Rgba => 4usize,
-        PixelFormat::Rgb24 => 3usize,
-        other => {
-            return Err(Error::invalid(format!(
-                "transcode: unexpected packed format {other:?}"
-            )))
-        }
-    };
-    let plane = frame
-        .planes
-        .first()
-        .ok_or_else(|| Error::invalid("transcode: converted frame has no plane"))?;
-    let tight = width as usize * bpp;
-    let h = height as usize;
-    let mut pixels = Vec::with_capacity(tight * h);
-    for row in 0..h {
-        let start = row * plane.stride;
-        let end = start + tight;
-        if end > plane.data.len() {
-            return Err(Error::invalid(
-                "transcode: converted plane row out of bounds",
-            ));
-        }
-        pixels.extend_from_slice(&plane.data[start..end]);
-    }
-    Ok(RgbaImage {
-        width,
-        height,
-        pixels,
-        stride: tight,
-    })
+    RgbaImage::from_image_in(&img.to_image()?, dst)
 }
 
 /// Rescale an image to new dimensions via the image-filter `Resize`
-/// kernel (behind the `transforms` feature).
+/// kernel (behind the `transforms` feature). The kernel works on a
+/// framework `VideoFrame`; the gateway's `Image` wraps the result so the
+/// (possibly stride-padded) output is re-packed tightly.
 #[cfg(feature = "transforms")]
 fn resize_image(img: &RgbaImage, width: u32, height: u32) -> Result<RgbaImage> {
+    use oxideav_core::{CodecId, CodecParameters};
     use oxideav_image_filter::{ImageFilter, Resize, VideoStreamParams};
     if width == 0 || height == 0 {
         return Err(Error::invalid("transcode: resize target must be non-zero"));
     }
-    let src_format = if img.is_rgb() {
-        PixelFormat::Rgb24
-    } else {
-        PixelFormat::Rgba
-    };
-    let frame = VideoFrame {
-        pts: Some(0),
-        planes: vec![VideoPlane {
-            stride: img.stride,
-            data: img.pixels.clone(),
-        }],
-    };
+    let src_format = img.pixel_format();
+    let (frame, _) = img.to_image()?.into_video_frame();
     let params = VideoStreamParams {
         format: src_format,
         width: img.width,
@@ -177,7 +115,12 @@ fn resize_image(img: &RgbaImage, width: u32, height: u32) -> Result<RgbaImage> {
     let out = Resize::new(width, height)
         .apply(&frame, params)
         .map_err(|e| Error::Decode(format!("transcode: resize failed: {e}")))?;
-    frame_to_image(&out, width, height, src_format)
+    let mut cp = CodecParameters::video(CodecId::new("rawvideo"));
+    cp.width = Some(width);
+    cp.height = Some(height);
+    cp.pixel_format = Some(src_format);
+    let resized = oxideav_image::Image::from_video_frame(out, &cp)?;
+    RgbaImage::from_image_in(&resized, src_format)
 }
 
 #[cfg(not(feature = "transforms"))]
@@ -185,6 +128,28 @@ fn resize_image(_img: &RgbaImage, _width: u32, _height: u32) -> Result<RgbaImage
     Err(Error::unsupported(
         "transcode: Resize requires the `transforms` feature (enabled by default via `full`)",
     ))
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn convert_rgba_to_rgb_and_back() {
+        let rgba = RgbaImage {
+            width: 2,
+            height: 1,
+            pixels: vec![1, 2, 3, 255, 4, 5, 6, 0],
+            stride: 8,
+        };
+        let rgb = convert_image(&rgba, PixelChoice::Rgb).unwrap();
+        assert!(rgb.is_rgb());
+        assert_eq!(rgb.pixels, vec![1, 2, 3, 4, 5, 6]);
+        // Auto keeps the layout it is given.
+        assert_eq!(convert_image(&rgb, PixelChoice::Auto).unwrap(), rgb);
+        let back = convert_image(&rgb, PixelChoice::Rgba).unwrap();
+        assert_eq!(back.pixels, vec![1, 2, 3, 255, 4, 5, 6, 255]);
+    }
 }
 
 #[cfg(all(test, feature = "full"))]
@@ -250,10 +215,14 @@ mod tests {
         };
         transcode_with(&c, Source::bytes(&png), Sink::Buffer(&mut out), &opts)
             .expect("transcode + resize");
-        // Reopen and confirm new dimensions.
+        // Reopen and confirm new dimensions and that the solid colour
+        // survived the resample.
         let reopened = open_with(&c, Source::bytes(&out), &OpenOptions::eager()).expect("reopen");
         match reopened {
-            Opened::Image(o) => assert_eq!((o.width, o.height), (2, 2)),
+            Opened::Image(o) => {
+                assert_eq!((o.width, o.height), (2, 2));
+                assert_eq!(o.pixels, [255, 0, 0, 255].repeat(4));
+            }
             other => panic!("expected Image, got {other:?}"),
         }
     }
@@ -274,5 +243,8 @@ mod tests {
         transcode_with(&c, Source::bytes(&png), Sink::Buffer(&mut out), &opts)
             .expect("transcode convert");
         assert_eq!(&out[0..4], &[0x89, b'P', b'N', b'G']);
+        let native = crate::open::open_image_with(&c, Source::bytes(&out), &OpenOptions::default())
+            .expect("reopen");
+        assert_eq!(native.format(), PixelFormat::Rgb24);
     }
 }

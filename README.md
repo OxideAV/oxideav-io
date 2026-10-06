@@ -27,7 +27,7 @@ match open("input.png")? {
 
 | Variant          | Produced for                              | Eager? |
 |------------------|-------------------------------------------|--------|
-| `Image(RgbaImage)` | still images (PNG, JPEG, BMP, WebP, GIF, TIFF, QOI, …) | yes |
+| `Image(RgbaImage)` | still images (PNG, JPEG, BMP, HEIC, GIF, TIFF, …), packed RGBA8888 — see [Images ride oxideav-image](#images-ride-oxideav-image) for the native picture | yes |
 | `Vector(VectorFrame)` | SVG / vector graphics                  | yes |
 | `Scene(Scene)`   | PDF documents (one entry per page) — `pdf` feature | yes |
 | `Mesh(Scene3D)`  | 3D models (STL/OBJ/glTF/GLB/USDZ/FBX) — `mesh` feature | yes |
@@ -42,17 +42,58 @@ Alongside the unified `open()`, there are specialized entry points that
 decode straight to what you want:
 
 ```rust
-let rgba = oxideav_io::open_rgba("photo.jpg")?;   // packed RGBA8888
-let rgb  = oxideav_io::open_rgb("photo.jpg")?;    // packed RGB24
-let av   = oxideav_io::open_media("clip.mp4")?;   // always lazy
+let img  = oxideav_io::open_image("photo.jpg")?;      // native oxideav_image::Image
+let rgba: Vec<u8> = img.to_rgba8()?;                   // packed bytes only when you need them
+let file = oxideav_io::open_image_file("anim.gif")?;  // every frame + container + metadata
+let av   = oxideav_io::open_media("clip.mp4")?;       // always lazy
 # Ok::<(), oxideav_io::Error>(())
 ```
+
+`open_rgba` / `open_rgb` (and their `_with` forms) still exist as
+deprecated thin flatteners of `open_image`.
 
 Every opener has a `_with(ctx, source, opts)` sibling and takes an
 [`OpenOptions`] that can **restrict which container / codec is allowed to
 run** (`allow_containers` / `deny_containers` / `allow_codecs` /
 `deny_codecs`) — handy for sandboxing untrusted input to a known-safe
 format set.
+
+## Images ride oxideav-image
+
+Since round 473 every still-image decode, pixel-layout conversion,
+encode and mux in this crate goes through the
+[`oxideav-image`](https://crates.io/crates/oxideav-image) gateway
+(Layer 2 of the workspace's `IMAGE_CRATE_API.md`). `oxideav-io` no
+longer carries its own probe → demux → decode → pack pipeline for
+stills, nor its own encoder / muxer ladder; what it adds on top of the
+gateway is:
+
+* **source / sink addressing** — paths, URIs through the
+  `SourceRegistry`, byte buffers, readers and writers;
+* the **discrimination ladder** — PDF → `Scene`, 3D → `Mesh`, vector →
+  `Vector`, single-frame video → `Image`, everything else → lazy
+  `Media`;
+* the **allow / deny container + codec lists** of `OpenOptions`,
+  enforced *before* the gateway runs: the container is probed and
+  checked, and when the codec lists restrict anything the stream table
+  is read (a header parse, no decode) and every stream's codec id is
+  checked — a denied codec never decodes a byte.
+
+What you get:
+
+| Entry point | Returns | Notes |
+|---|---|---|
+| `open_image(path)` / `open_image_with(ctx, src, opts)` | `oxideav_image::Image` | the primary picture in its native layout (`width()`, `height()`, `format()`, `palette()`, `color_signal()`, `to_rgba8()`, `to_rgb8()`, `to_format(..)`, `crop(..)`); only the first picture is decoded |
+| `open_image_file(path)` / `open_image_file_with(..)` | `oxideav_image::ImageFile` | every picture in file order with per-frame `delay()` / `timestamp()`, plus `container()` and `metadata()` |
+| `open(path)` → `Opened::Image(RgbaImage)` | packed RGBA8888 | unchanged shape; built from the native picture |
+| `save_image_with(ctx, &Image, sink, &SaveOptions)` | — | encode a native picture without flattening it first |
+| `RgbaImage::from_image` / `from_image_rgb` / `to_image` / `TryFrom` both ways | — | the bridge between the flattened buffer and the native picture |
+
+`Image` and `ImageFile` are re-exported at the crate root, so callers
+need no direct `oxideav-image` dependency to name them. Errors from the
+gateway fold onto this crate's variants (`UnknownFormat` → `Probe` on
+read, `Unsupported` on write; `InvalidData` / `NoImage` /
+`LimitExceeded` → `Invalid`; registry errors as before).
 
 ## Probing (identify without decoding)
 
@@ -195,12 +236,26 @@ save(&opened, "photo.jpg")?;      // re-encode PNG → JPEG by extension
 `save_with(ctx, &opened, sink, &SaveOptions)` takes a `Sink`
 (`Sink::Path` / `Sink::Writer(Box<dyn Write + Send>)` /
 `Sink::Buffer(&mut Vec<u8>)`) and a `SaveOptions { container, codec,
-pixel, quality }`. `PixelChoice::{Auto, Rgb, Rgba}` selects the packed
-layout — `Auto` consults the codec's accepted-format set and prefers an
-alpha-capable layout. The whole container is assembled in memory first,
-so a seekable muxer works even over a non-seekable writer. 3D meshes
-re-encode through the mesh registry by the sink's extension; PDF/document
-`Scene` writing is out of scope for now.
+pixel, quality }`, mapped onto `oxideav_image::encode`:
+
+* `container` is a registered container name **or a file extension**
+  (`"png"`, `"jpeg"`, `"jpg"`, `"heic"`, …); `None` derives it from the
+  sink's extension. The payload codec is the container's default as the
+  gateway resolves it (`jpeg` → `mjpeg`, `y4m` → `rawvideo`, prefixed
+  encoder families such as `webp_vp8l`, …) unless `codec` forces one.
+* `PixelChoice::Auto` is the gateway's pixel-format ladder — the image's
+  own layout first, then `Rgba`, `Rgb24`, `Gray8`, `Yuv444P`,
+  `Yuv420P`, `Rgba64Le` — stepping whenever the encoder **or** the muxer
+  refuses a layout; `Rgb` / `Rgba` replace the ladder by that single
+  layout and fail loudly if it is refused.
+* `quality` reaches the encoder only when its declared option schema
+  has a `quality` field (lossless encoders would reject the unknown
+  option).
+
+The whole container is assembled in memory first, so a seekable muxer
+works even over a non-seekable writer. 3D meshes re-encode through the
+mesh registry by the sink's extension; PDF/document `Scene` writing is
+out of scope for now.
 
 ## Transcoding
 
@@ -221,8 +276,8 @@ transcode_with(&ctx, Source::Path("in.png".as_ref()), Sink::Buffer(&mut out), &o
 ```
 
 `Transform::Resize` (via `oxideav-image-filter`, behind the default-on
-`transforms` feature) and `Transform::Convert(PixelChoice)` (via
-`oxideav-pixfmt`) cover the still-image path. The audio/video pipeline
+`transforms` feature) and `Transform::Convert(PixelChoice)` (via the
+gateway's `Image::to_format`) cover the still-image path. The audio/video pipeline
 path (built on `oxideav-pipeline`) is the next step — a/v inputs return
 an `Unsupported` error today.
 
@@ -261,7 +316,7 @@ hand in, parked at *any* position.
 | Feature    | Default | Effect |
 |------------|:-------:|--------|
 | `full`     | ✅ | Zero-config `open(path)` — builds a `RuntimeContext` from `oxideav-meta` covering every codec/container/source. Turns on `pdf` + `mesh`. |
-| `registry` | via `full` | Base layer. Caller supplies a populated `RuntimeContext` and uses the `*_with(ctx, …)` functions; no `oxideav-meta` dependency. |
+| `registry` | via `full` | Base layer. Caller supplies a populated `RuntimeContext` and uses the `*_with(ctx, …)` functions; pulls `oxideav-core` + `oxideav-image`, no `oxideav-meta` dependency. |
 | `pdf`      | via `full` | Eager PDF → `Scene` decode. |
 | `mesh`     | via `full` | Eager 3D model → `Scene3D` decode + 3D save. |
 | `transforms` | via `full` | `Transform::Resize` for transcode (pulls `oxideav-image-filter`). |
@@ -282,7 +337,8 @@ resolve; inside the workspace it always resolves via `[patch.crates-io]`.
 ## Status
 
 The **read** facade (Phase 1), the **write** facade (Phase 2), and the
-still-image **transcode** path (Phase 3) are all in place. The
+still-image **transcode** path (Phase 3) are all in place, with the
+still-image half riding the `oxideav-image` gateway since round 473. The
 **probe** subsystem is contract-hardened: an enforced `ping_format`
 read budget, a fixture-backed coverage matrix (PNG / JPEG / PBM / DDS /
 WAV / AVI / Matroska / MP3 / SRT / WebVTT / Y4M / SVG / PDF / STL —

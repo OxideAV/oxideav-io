@@ -1,18 +1,28 @@
-//! Packed pixel buffer + the collapse from a decoded [`VideoFrame`].
+//! Packed pixel buffer + the bridge to the gateway's native
+//! [`oxideav_image::Image`].
 //!
-//! [`RgbaImage`] mirrors the proven handoff shape used elsewhere in the
-//! workspace: an owned, tightly-packed RGBA8888 (or RGB24) buffer with
-//! explicit dimensions. The pixel layout is inferred from `stride /
-//! width` (4 ⇒ RGBA, 3 ⇒ RGB24) so the struct stays format-tag-free.
+//! [`RgbaImage`] is the flattened handoff shape this facade has always
+//! returned: an owned, tightly-packed RGBA8888 (or RGB24) buffer with
+//! explicit dimensions, the pixel layout inferred from `stride / width`
+//! (4 ⇒ RGBA, 3 ⇒ RGB24). Since round 473 every conversion into or out
+//! of it goes through `oxideav-image` — [`RgbaImage::from_image`] packs
+//! a native [`Image`] (any layout the registry decodes, with the
+//! stream's colour signal honoured), [`RgbaImage::to_image`] wraps the
+//! buffer back into an `Image` for the gateway's encoders.
 
-use oxideav_core::{PixelFormat, VideoFrame};
-use oxideav_pixfmt::{convert as pix_convert, ConvertOptions, FrameInfo};
+use oxideav_core::PixelFormat;
+use oxideav_image::Image;
 
 use crate::error::{Error, Result};
 
 /// Owned, tightly-packed RGBA8888 / RGB24 image with explicit
 /// dimensions. `stride == width * 4` ⇒ RGBA; `stride == width * 3` ⇒
 /// RGB24.
+///
+/// This is the flattened view; the native picture (any layout, palette,
+/// colour signal, timing) is [`oxideav_image::Image`], reachable through
+/// [`open_image_with`](crate::open_image_with) and the conversions
+/// below.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RgbaImage {
     pub width: u32,
@@ -38,81 +48,111 @@ impl RgbaImage {
             self.stride / (self.width as usize)
         }
     }
+
+    /// The packed layout this buffer carries: [`PixelFormat::Rgb24`]
+    /// when [`is_rgb`](Self::is_rgb), else [`PixelFormat::Rgba`].
+    pub fn pixel_format(&self) -> PixelFormat {
+        if self.is_rgb() {
+            PixelFormat::Rgb24
+        } else {
+            PixelFormat::Rgba
+        }
+    }
+
+    /// Flatten a native gateway [`Image`] to packed RGBA8888 (alpha
+    /// opaque when the source has none). The conversion runs through
+    /// `oxideav-image` → `oxideav-pixfmt` with the picture's colour
+    /// signal.
+    pub fn from_image(img: &Image) -> Result<RgbaImage> {
+        Self::from_image_in(img, PixelFormat::Rgba)
+    }
+
+    /// Flatten a native gateway [`Image`] to packed RGB24 (alpha dropped).
+    pub fn from_image_rgb(img: &Image) -> Result<RgbaImage> {
+        Self::from_image_in(img, PixelFormat::Rgb24)
+    }
+
+    /// Flatten to `dst`, which must be `Rgba` or `Rgb24` — the two
+    /// layouts [`RgbaImage`] can express.
+    pub(crate) fn from_image_in(img: &Image, dst: PixelFormat) -> Result<RgbaImage> {
+        let bpp = match dst {
+            PixelFormat::Rgba => 4usize,
+            PixelFormat::Rgb24 => 3usize,
+            other => {
+                return Err(Error::invalid(format!(
+                    "RgbaImage: destination must be Rgba or Rgb24, got {other:?}"
+                )))
+            }
+        };
+        let (width, height) = (img.width(), img.height());
+        if width == 0 || height == 0 {
+            return Err(Error::invalid("RgbaImage: zero-sized frame"));
+        }
+        let pixels = img.to_packed(dst)?;
+        Ok(RgbaImage {
+            width,
+            height,
+            pixels,
+            stride: (width as usize) * bpp,
+        })
+    }
+
+    /// Wrap this buffer as a native gateway [`Image`] in its own packed
+    /// layout (no conversion). Fails with [`Error::Invalid`] when
+    /// `pixels.len()` disagrees with `width × height × bytes-per-pixel`.
+    pub fn to_image(&self) -> Result<Image> {
+        Ok(Image::from_raw(
+            self.width,
+            self.height,
+            self.pixel_format(),
+            self.pixels.clone(),
+        )?)
+    }
+
+    /// [`to_image`](Self::to_image), consuming the buffer.
+    pub fn into_image(self) -> Result<Image> {
+        Ok(Image::from_raw(
+            self.width,
+            self.height,
+            self.pixel_format(),
+            self.pixels,
+        )?)
+    }
 }
 
-/// Collapse a decoded [`VideoFrame`] (in its native pixel format,
-/// described by `src_format`/`width`/`height`) into a tightly-packed
-/// [`RgbaImage`] in the requested `dst` format.
-///
-/// `dst` must be [`PixelFormat::Rgba`] or [`PixelFormat::Rgb24`]; any
-/// other target is rejected. Conversion is delegated to
-/// `oxideav-pixfmt`, then the (possibly stride-padded) result plane is
-/// repacked to a tight `width * bpp` stride.
-pub(crate) fn frame_to_packed(
-    frame: &VideoFrame,
-    src_format: PixelFormat,
-    width: u32,
-    height: u32,
-    dst: PixelFormat,
-) -> Result<RgbaImage> {
-    let bpp = match dst {
-        PixelFormat::Rgba => 4usize,
-        PixelFormat::Rgb24 => 3usize,
-        other => {
-            return Err(Error::invalid(format!(
-                "frame_to_packed: destination must be Rgba or Rgb24, got {other:?}"
-            )))
-        }
-    };
-    if width == 0 || height == 0 {
-        return Err(Error::invalid("frame_to_packed: zero-sized frame"));
+impl TryFrom<Image> for RgbaImage {
+    type Error = Error;
+    /// Packed RGBA8888 (see [`RgbaImage::from_image`]).
+    fn try_from(img: Image) -> Result<Self> {
+        RgbaImage::from_image(&img)
     }
+}
 
-    let info = FrameInfo::new(src_format, width, height);
-    let converted = pix_convert(frame, info, dst, &ConvertOptions::default())?;
-    let plane = converted
-        .planes
-        .first()
-        .ok_or_else(|| Error::invalid("frame_to_packed: converted frame has no plane"))?;
-
-    let tight = (width as usize) * bpp;
-    let h = height as usize;
-    let mut pixels = Vec::with_capacity(tight * h);
-    if plane.stride == tight {
-        // Already tight — but defend against a short final row.
-        let needed = tight * h;
-        if plane.data.len() < needed {
-            return Err(Error::invalid(
-                "frame_to_packed: converted plane shorter than width*height*bpp",
-            ));
-        }
-        pixels.extend_from_slice(&plane.data[..needed]);
-    } else {
-        // Strip per-row padding.
-        for row in 0..h {
-            let start = row * plane.stride;
-            let end = start + tight;
-            if end > plane.data.len() {
-                return Err(Error::invalid(
-                    "frame_to_packed: converted plane row out of bounds",
-                ));
-            }
-            pixels.extend_from_slice(&plane.data[start..end]);
-        }
+impl TryFrom<&Image> for RgbaImage {
+    type Error = Error;
+    /// Packed RGBA8888 (see [`RgbaImage::from_image`]).
+    fn try_from(img: &Image) -> Result<Self> {
+        RgbaImage::from_image(img)
     }
+}
 
-    Ok(RgbaImage {
-        width,
-        height,
-        pixels,
-        stride: tight,
-    })
+impl TryFrom<RgbaImage> for Image {
+    type Error = Error;
+    fn try_from(img: RgbaImage) -> Result<Self> {
+        img.into_image()
+    }
+}
+
+impl TryFrom<&RgbaImage> for Image {
+    type Error = Error;
+    fn try_from(img: &RgbaImage) -> Result<Self> {
+        img.to_image()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxideav_core::frame::VideoPlane;
 
     #[test]
     fn is_rgb_and_bpp() {
@@ -124,6 +164,7 @@ mod tests {
         };
         assert!(!rgba.is_rgb());
         assert_eq!(rgba.bytes_per_pixel(), 4);
+        assert_eq!(rgba.pixel_format(), PixelFormat::Rgba);
         let rgb = RgbaImage {
             width: 4,
             height: 2,
@@ -132,39 +173,64 @@ mod tests {
         };
         assert!(rgb.is_rgb());
         assert_eq!(rgb.bytes_per_pixel(), 3);
+        assert_eq!(rgb.pixel_format(), PixelFormat::Rgb24);
     }
 
     #[test]
-    fn rgb24_collapses_to_rgba_with_opaque_alpha() {
-        // 2×2 Rgb24, tight stride 6.
-        let frame = VideoFrame {
-            pts: None,
-            planes: vec![VideoPlane {
-                stride: 6,
-                data: vec![
-                    10, 20, 30, 40, 50, 60, // row 0: two pixels
-                    70, 80, 90, 100, 110, 120, // row 1
-                ],
-            }],
-        };
-        let out = frame_to_packed(&frame, PixelFormat::Rgb24, 2, 2, PixelFormat::Rgba).unwrap();
-        assert_eq!(out.width, 2);
-        assert_eq!(out.height, 2);
-        assert_eq!(out.stride, 8);
+    fn rgb24_image_flattens_to_rgba_with_opaque_alpha() {
+        // 2×2 Rgb24 native picture.
+        let img = Image::from_rgb8(
+            2,
+            2,
+            vec![
+                10, 20, 30, 40, 50, 60, // row 0: two pixels
+                70, 80, 90, 100, 110, 120, // row 1
+            ],
+        )
+        .unwrap();
+        let out = RgbaImage::from_image(&img).unwrap();
+        assert_eq!((out.width, out.height, out.stride), (2, 2, 8));
         assert_eq!(out.pixels.len(), 16);
-        // First pixel R,G,B preserved, alpha opaque.
         assert_eq!(&out.pixels[0..4], &[10, 20, 30, 255]);
+        // And the RGB24 flattening is the identity.
+        let rgb = RgbaImage::from_image_rgb(&img).unwrap();
+        assert!(rgb.is_rgb());
+        assert_eq!(&rgb.pixels[..], img.as_packed().unwrap());
     }
 
     #[test]
     fn rejects_non_rgb_destination() {
-        let frame = VideoFrame {
-            pts: None,
-            planes: vec![VideoPlane {
-                stride: 6,
-                data: vec![0; 12],
-            }],
+        let img = Image::from_rgb8(2, 2, vec![0; 12]).unwrap();
+        assert!(matches!(
+            RgbaImage::from_image_in(&img, PixelFormat::Yuv420P),
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn round_trips_through_the_native_image() {
+        let src = RgbaImage {
+            width: 2,
+            height: 1,
+            pixels: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            stride: 8,
         };
-        assert!(frame_to_packed(&frame, PixelFormat::Rgb24, 2, 2, PixelFormat::Yuv420P).is_err());
+        let img: Image = (&src).try_into().unwrap();
+        assert_eq!(img.format(), PixelFormat::Rgba);
+        assert_eq!((img.width(), img.height()), (2, 1));
+        let back: RgbaImage = img.try_into().unwrap();
+        assert_eq!(back, src);
+    }
+
+    #[test]
+    fn inconsistent_stride_is_invalid() {
+        // 2 wide, stride says RGBA, but only 6 bytes of pixels.
+        let bad = RgbaImage {
+            width: 2,
+            height: 1,
+            pixels: vec![0; 6],
+            stride: 8,
+        };
+        assert!(matches!(bad.to_image(), Err(Error::Invalid(_))));
     }
 }

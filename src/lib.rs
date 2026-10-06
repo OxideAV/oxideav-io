@@ -4,7 +4,9 @@
 //! format and dispatches through the [`oxideav-core`] registries to
 //! return a decoded [`Opened`] value:
 //!
-//! * still images decode eagerly to a packed [`RgbaImage`];
+//! * still images decode eagerly to a packed [`RgbaImage`] — or, through
+//!   [`open_image`] / [`open_image_file`], to the `oxideav-image`
+//!   gateway's native [`Image`] / [`ImageFile`];
 //! * PDF documents decode to an `oxideav_scene::Scene` (one page each);
 //! * 3D models decode to an `oxideav_mesh3d::Scene3D`;
 //! * SVG / vector inputs yield a single `VectorFrame`;
@@ -23,11 +25,22 @@
 //!     _ => {}
 //! }
 //!
-//! // Specialized: decode straight to packed pixels.
-//! let rgba = oxideav_io::open_rgba("photo.png").unwrap();
-//! assert_eq!(rgba.stride, rgba.width as usize * 4);
+//! // Specialized: the native picture, converted only when you need bytes.
+//! let img = oxideav_io::open_image("photo.png").unwrap();
+//! let rgba: Vec<u8> = img.to_rgba8().unwrap();
+//! assert_eq!(rgba.len(), img.width() as usize * img.height() as usize * 4);
 //! # }
 //! ```
+//!
+//! ## Images ride `oxideav-image`
+//!
+//! Every still-image decode, pixel-layout conversion, encode and mux in
+//! this crate goes through the [`oxideav-image`](oxideav_image) gateway
+//! (Layer 2 of the workspace's `IMAGE_CRATE_API.md`); this crate adds
+//! source / sink addressing, the PDF / 3D / A-V discrimination ladder,
+//! and the allow / deny container + codec lists on top. [`RgbaImage`]
+//! stays as the flattened handoff shape and converts both ways
+//! (`RgbaImage::from_image`, `RgbaImage::to_image`, `TryFrom`).
 //!
 //! ## Features
 //!
@@ -72,14 +85,21 @@ pub use error::{Error, Result};
 #[cfg(feature = "registry")]
 pub use image::RgbaImage;
 #[cfg(feature = "registry")]
+#[allow(deprecated)]
 pub use open::{
-    open_media_with, open_rgb_with, open_rgba_with, open_with, ping_format_with, probe_with,
-    DecodedFrame, MediaReader, OpenOptions, Opened,
+    open_image_file_with, open_image_with, open_media_with, open_rgb_with, open_rgba_with,
+    open_with, ping_format_with, probe_with, DecodedFrame, MediaReader, OpenOptions, Opened,
 };
 #[cfg(feature = "registry")]
 pub use probe::{MediaKind, PingFormat, Probe, StreamInfo, StreamKind, PING_FORMAT_MAX_READ_BYTES};
 #[cfg(feature = "registry")]
-pub use save::{save_with, PixelChoice, SaveOptions};
+pub use save::{save_image_with, save_with, PixelChoice, SaveOptions};
+
+/// The gateway's native picture types, re-exported so callers of
+/// [`open_image`] / [`open_image_with`] need no direct `oxideav-image`
+/// dependency to name them.
+#[cfg(feature = "registry")]
+pub use oxideav_image::{Image, ImageFile};
 #[cfg(feature = "registry")]
 pub use source::{Sink, Source};
 #[cfg(feature = "registry")]
@@ -176,24 +196,43 @@ pub fn probe(path: impl AsRef<std::path::Path>) -> Result<Probe> {
     )
 }
 
-/// Open a file and decode its first frame to packed RGBA8888.
+/// Open a still image and return its primary picture in its native
+/// layout, through the `oxideav-image` gateway. Convert with
+/// `Image::to_rgba8()` / `to_rgb8()` / `to_format(..)` when you need
+/// bytes, or flatten with [`RgbaImage::from_image`].
 #[cfg(feature = "full")]
-pub fn open_rgba(path: impl AsRef<std::path::Path>) -> Result<RgbaImage> {
-    open_rgba_with(
+pub fn open_image(path: impl AsRef<std::path::Path>) -> Result<Image> {
+    open_image_with(
         default_context(),
         Source::Path(path.as_ref()),
         &OpenOptions::default(),
     )
 }
 
-/// Open a file and decode its first frame to packed RGB24.
+/// Open a still-image file — every picture (animation frames, bursts,
+/// pages), the container name and its metadata — through the
+/// `oxideav-image` gateway.
 #[cfg(feature = "full")]
-pub fn open_rgb(path: impl AsRef<std::path::Path>) -> Result<RgbaImage> {
-    open_rgb_with(
+pub fn open_image_file(path: impl AsRef<std::path::Path>) -> Result<ImageFile> {
+    open_image_file_with(
         default_context(),
         Source::Path(path.as_ref()),
         &OpenOptions::default(),
     )
+}
+
+/// Open a file and decode its first frame to packed RGBA8888.
+#[cfg(feature = "full")]
+#[deprecated(note = "use `open_image(path)` and `Image::to_rgba8` / `RgbaImage::from_image`")]
+pub fn open_rgba(path: impl AsRef<std::path::Path>) -> Result<RgbaImage> {
+    RgbaImage::from_image(&open_image(path)?)
+}
+
+/// Open a file and decode its first frame to packed RGB24.
+#[cfg(feature = "full")]
+#[deprecated(note = "use `open_image(path)` and `Image::to_rgb8` / `RgbaImage::from_image_rgb`")]
+pub fn open_rgb(path: impl AsRef<std::path::Path>) -> Result<RgbaImage> {
+    RgbaImage::from_image_rgb(&open_image(path)?)
 }
 
 /// Open a file as a lazy [`MediaReader`], regardless of frame count.

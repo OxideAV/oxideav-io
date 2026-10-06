@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Images ride `oxideav-image`.** Every still-image decode, pixel-layout
+  conversion, encode and mux goes through the `oxideav-image` gateway
+  (Layer 2 of `IMAGE_CRATE_API.md`); the crate's own frame packing
+  (`oxideav-pixfmt` direct dependency), encoder ladder, in-memory mux
+  cursor and default-codec table are gone (about 450 lines of duplicated
+  pipeline; net −57 non-test lines once the new entry points, the
+  allow / deny admission and the `RgbaImage` bridge are counted).
+  `registry` now pulls `oxideav-core` + `oxideav-image`.
+- `SaveOptions::container` accepts a file extension as well as a
+  container name; `PixelChoice::Auto` is the gateway's ladder (image's
+  own layout, then `Rgba`, `Rgb24`, `Gray8`, `Yuv444P`, `Yuv420P`,
+  `Rgba64Le`, stepping on encoder **or** muxer refusal); `quality` is
+  forwarded only to encoders whose option schema declares it.
+- `Opened::Image` is built from the native `oxideav_image::Image`
+  (stream colour signal honoured by the conversion).
+- Gateway errors fold onto the facade's variants: `UnknownFormat` →
+  `Probe` on read / `Unsupported` on write, `InvalidData` / `NoImage` /
+  `LimitExceeded` → `Invalid`.
+- The Y4M save test now requires the round trip (a `rawvideo` encoder is
+  registered); the first layout Y4M accepts on the gateway's ladder is
+  `Gray8` (`Cmono`).
+
+### Added
+
+- `open_image` / `open_image_with` → `oxideav_image::Image` (primary
+  picture, native layout; only the first picture is decoded) and
+  `open_image_file` / `open_image_file_with` → `oxideav_image::ImageFile`
+  (every picture, container name, metadata). `OpenOptions` allow / deny
+  lists are enforced before the gateway runs (container probe; stream
+  table header parse for the codec lists — a denied codec never decodes).
+- `save_image_with(ctx, &Image, sink, &SaveOptions)` encodes a native
+  picture without flattening.
+- `RgbaImage::from_image` / `from_image_rgb` / `to_image` / `into_image` /
+  `pixel_format`, `TryFrom<Image> for RgbaImage` and `TryFrom<RgbaImage>
+  for Image` (both by value and by reference).
+- `PixelChoice::pixel_format()`, `SaveOptions::to_image_options()`.
+- `Image` and `ImageFile` re-exported at the crate root.
+
+### Deprecated
+
+- `open_rgba`, `open_rgb`, `open_rgba_with`, `open_rgb_with` — thin
+  flatteners of `open_image*`; use the native `Image` and convert with
+  `to_rgba8` / `to_rgb8` / `RgbaImage::from_image` when bytes are needed.
+
 ## [0.1.1](https://github.com/OxideAV/oxideav-io/compare/v0.1.0...v0.1.1) - 2026-10-04
 
 ### Fixed

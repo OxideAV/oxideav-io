@@ -75,6 +75,28 @@ impl From<std::io::Error> for Error {
     }
 }
 
+/// The gateway's errors fold onto the facade's variants: `Io` and
+/// `Core` keep their meaning (`Core` through the `oxideav_core::Error`
+/// mapping below), `UnknownFormat` is a probe failure, `NoImage` /
+/// `InvalidData` / `LimitExceeded` are facade-level invariants, and
+/// `Unsupported` stays `Unsupported`. The save path remaps
+/// `UnknownFormat` to `Unsupported` itself (an extension no muxer
+/// claims is not a detection failure).
+#[cfg(feature = "registry")]
+impl From<oxideav_image::ImageError> for Error {
+    fn from(e: oxideav_image::ImageError) -> Self {
+        use oxideav_image::ImageError as Ie;
+        match e {
+            Ie::Io(e) => Error::Io(e),
+            Ie::Core(e) => Error::from(e),
+            Ie::UnknownFormat(m) => Error::Probe(m),
+            Ie::Unsupported(m) => Error::Unsupported(m),
+            Ie::NoImage(m) | Ie::InvalidData(m) | Ie::LimitExceeded(m) => Error::Invalid(m),
+            other => Error::Decode(other.to_string()),
+        }
+    }
+}
+
 #[cfg(feature = "registry")]
 impl From<oxideav_core::Error> for Error {
     fn from(e: oxideav_core::Error) -> Self {

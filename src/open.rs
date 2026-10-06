@@ -2,11 +2,14 @@
 //! openers, all built on the `oxideav-core` registries.
 
 use std::collections::VecDeque;
+use std::io::{Read, Seek, SeekFrom};
+use std::sync::{Arc, Mutex};
 
 use oxideav_core::{Decoder, Demuxer, Frame, PixelFormat, ReadSeek, RuntimeContext, StreamInfo};
+use oxideav_image::{Image, ImageFile};
 
 use crate::error::{Error, Result};
-use crate::image::{frame_to_packed, RgbaImage};
+use crate::image::RgbaImage;
 use crate::probe::{
     is_mesh3d, is_pdf, peek_magic, MediaKind, PingFormat, Probe, StreamInfo as ProbeStreamInfo,
 };
@@ -55,9 +58,15 @@ impl OpenOptions {
 /// stay lazy behind [`MediaReader`]. Marked `#[non_exhaustive]` and the
 /// `Scene` / `Mesh` variants are feature-gated, so match arms need a
 /// wildcard.
+// `Mesh(Scene3D)` (behind `mesh`) is the large variant; boxing it would
+// change the payload every `Opened::Mesh(scene)` matcher binds, so the
+// variant stays by value (`Scene` was boxed at birth, before it had users).
+#[allow(clippy::large_enum_variant)]
 #[non_exhaustive]
 pub enum Opened {
-    /// A still image, decoded and packed to RGBA8888 / RGB24.
+    /// A still image, decoded and packed to RGBA8888. For the picture
+    /// in its native layout (palette, colour signal, 16-bit, …) use
+    /// [`open_image_with`] / [`open_image_file_with`].
     Image(RgbaImage),
     /// A resolution-independent vector frame (SVG, vector PDF page).
     Vector(oxideav_core::VectorFrame),
@@ -465,35 +474,24 @@ fn is_single_image(reader: &MediaReader) -> bool {
             .any(|df| matches!(df.frame, Frame::Audio(_)))
 }
 
-/// Pop the front (video) frame and pack it into the destination format.
+/// Pop the front (video) frame — already decoded by the look-ahead —
+/// wrap it as a gateway [`Image`] with its stream's parameters, and
+/// flatten it to the destination layout.
 fn collapse_front_video(reader: &mut MediaReader, dst: PixelFormat) -> Result<RgbaImage> {
     let df = reader
         .queue
         .pop_front()
         .ok_or_else(|| Error::invalid("collapse_front_video: empty queue"))?;
-    pack_video(&reader.streams, df, dst)
-}
-
-/// Pack a decoded video frame into a tight RGBA/RGB24 buffer, reading
-/// its dimensions/format from the owning stream's parameters.
-fn pack_video(streams: &[StreamInfo], df: DecodedFrame, dst: PixelFormat) -> Result<RgbaImage> {
     let Frame::Video(vf) = df.frame else {
-        return Err(Error::invalid("pack_video: frame is not video"));
+        return Err(Error::invalid("collapse_front_video: frame is not video"));
     };
-    let params = &streams
+    let params = &reader
+        .streams
         .get(df.stream_index as usize)
-        .ok_or_else(|| Error::invalid("pack_video: stream index out of range"))?
+        .ok_or_else(|| Error::invalid("collapse_front_video: stream index out of range"))?
         .params;
-    let width = params
-        .width
-        .ok_or_else(|| Error::invalid("image stream has no width"))?;
-    let height = params
-        .height
-        .ok_or_else(|| Error::invalid("image stream has no height"))?;
-    let src_format = params
-        .pixel_format
-        .ok_or_else(|| Error::invalid("image stream has no pixel format"))?;
-    frame_to_packed(&vf, src_format, width, height, dst)
+    let image = Image::from_video_frame(vf, params)?;
+    RgbaImage::from_image_in(&image, dst)
 }
 
 /// Build a [`MediaReader`] from a byte stream via the container+codec
@@ -537,31 +535,151 @@ fn open_registry(
     })
 }
 
-// ───────────────────────── specialized openers ─────────────────────────
+// ───────────────────────── still images (gateway) ─────────────────────────
 
-/// Open a source and return its first frame packed as RGBA8888.
-pub fn open_rgba_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Result<RgbaImage> {
-    open_packed_with(ctx, src, opts, PixelFormat::Rgba)
+/// Open a source as a still image through the `oxideav-image` gateway
+/// and return its **primary** picture in its native layout.
+///
+/// Only the first picture is decoded (`max_frames = 1`); for every
+/// frame of an animation / burst / multi-page file, the container name
+/// and its metadata, use [`open_image_file_with`]. The allow / deny
+/// lists of `opts` are enforced before the gateway runs: the container
+/// is probed and checked, and when the codec lists restrict anything
+/// the stream table is read (a header parse, no decode) and every
+/// stream's codec is checked — a denied codec never gets to decode.
+pub fn open_image_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Result<Image> {
+    let file = open_image_file_inner(ctx, src, opts, Some(1))?;
+    Ok(file.into_primary())
 }
 
-/// Open a source and return its first frame packed as RGB24.
-pub fn open_rgb_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Result<RgbaImage> {
-    open_packed_with(ctx, src, opts, PixelFormat::Rgb24)
-}
-
-fn open_packed_with(
+/// Open a source as a still-image file through the `oxideav-image`
+/// gateway: every picture in file order, the container that matched and
+/// its metadata. Enforces the allow / deny lists like
+/// [`open_image_with`].
+pub fn open_image_file_with(
     ctx: &RuntimeContext,
     src: Source,
     opts: &OpenOptions,
-    dst: PixelFormat,
-) -> Result<RgbaImage> {
+) -> Result<ImageFile> {
+    open_image_file_inner(ctx, src, opts, None)
+}
+
+fn open_image_file_inner(
+    ctx: &RuntimeContext,
+    src: Source,
+    opts: &OpenOptions,
+    max_frames: Option<usize>,
+) -> Result<ImageFile> {
     let ext = opts.ext_hint.clone().or_else(|| src.ext_hint());
     let reader = src.into_read_seek(ctx)?;
-    let mut reader = open_registry(ctx, reader, ext.as_deref(), opts)?;
-    match reader.next_video_frame()? {
-        Some(df) => pack_video(&reader.streams, df, dst),
-        None => Err(Error::invalid("source produced no video frame to pack")),
+    let reader = admit_image_reader(ctx, reader, ext.as_deref(), opts)?;
+    let mut gopts = oxideav_image::OpenOptions::new();
+    if let Some(e) = ext {
+        gopts = gopts.with_ext_hint(e);
     }
+    if let Some(n) = max_frames {
+        gopts = gopts.with_max_frames(n);
+    }
+    Ok(oxideav_image::decode_reader(ctx, reader, &gopts)?)
+}
+
+/// Enforce [`OpenOptions`]'s allow / deny lists on a reader about to be
+/// handed to the gateway (which has no such option): probe the
+/// container and check its name; when the codec lists restrict
+/// anything, open the demuxer on a shared handle, check every stream's
+/// codec id against them, drop the demuxer, and rewind. Returns the
+/// reader positioned at byte 0, ready for `decode_reader`.
+fn admit_image_reader(
+    ctx: &RuntimeContext,
+    mut reader: Box<dyn ReadSeek>,
+    ext: Option<&str>,
+    opts: &OpenOptions,
+) -> Result<Box<dyn ReadSeek>> {
+    let cname = ctx
+        .containers
+        .probe_input(reader.as_mut(), ext)
+        .map_err(|e| Error::probe(e.to_string()))?;
+    if !permitted(&cname, &opts.allow_containers, &opts.deny_containers) {
+        return Err(Error::restricted(format!(
+            "container '{cname}' is not permitted by the open options"
+        )));
+    }
+    if opts.allow_codecs.is_none() && opts.deny_codecs.is_empty() {
+        reader.seek(SeekFrom::Start(0))?;
+        return Ok(reader);
+    }
+    // The demuxer takes ownership of its reader, so share it: one
+    // handle for the header parse, the other for the gateway.
+    let shared = SharedReader::new(reader);
+    {
+        let demuxer = ctx
+            .containers
+            .open_demuxer(&cname, Box::new(shared.clone()), &ctx.codecs)?;
+        for s in demuxer.streams() {
+            let codec_id = s.params.codec_id.as_str().to_string();
+            if !permitted(&codec_id, &opts.allow_codecs, &opts.deny_codecs) {
+                return Err(Error::restricted(format!(
+                    "codec '{codec_id}' is not permitted by the open options"
+                )));
+            }
+        }
+    }
+    let mut shared = shared;
+    shared.seek(SeekFrom::Start(0))?;
+    Ok(Box::new(shared))
+}
+
+/// A seekable reader two owners can hold in turn (the demuxer used for
+/// the allow / deny header parse, then the gateway). Never used by both
+/// at once, so the mutex only exists to satisfy `Send`.
+#[derive(Clone)]
+struct SharedReader(Arc<Mutex<Box<dyn ReadSeek>>>);
+
+impl SharedReader {
+    fn new(reader: Box<dyn ReadSeek>) -> Self {
+        SharedReader(Arc::new(Mutex::new(reader)))
+    }
+}
+
+impl Read for SharedReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("SharedReader: poisoned lock"))?
+            .read(buf)
+    }
+}
+
+impl Seek for SharedReader {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("SharedReader: poisoned lock"))?
+            .seek(pos)
+    }
+}
+
+// ───────────────────────── specialized openers ─────────────────────────
+
+/// Open a source and return its first frame packed as RGBA8888.
+///
+/// A thin flattening of [`open_image_with`] (`Image::to_rgba8`); new
+/// code should take the native [`Image`] and convert only when it
+/// needs packed bytes.
+#[deprecated(
+    note = "use `open_image_with(..)` and `RgbaImage::from_image` / `Image::to_rgba8` — \
+            the native picture keeps its layout, palette and colour signal"
+)]
+pub fn open_rgba_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Result<RgbaImage> {
+    RgbaImage::from_image_in(&open_image_with(ctx, src, opts)?, PixelFormat::Rgba)
+}
+
+/// Open a source and return its first frame packed as RGB24.
+///
+/// A thin flattening of [`open_image_with`] (`Image::to_rgb8`).
+#[deprecated(note = "use `open_image_with(..)` and `RgbaImage::from_image_rgb` / `Image::to_rgb8`")]
+pub fn open_rgb_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Result<RgbaImage> {
+    RgbaImage::from_image_in(&open_image_with(ctx, src, opts)?, PixelFormat::Rgb24)
 }
 
 /// Open a source as a lazy [`MediaReader`], regardless of frame count.
@@ -703,8 +821,102 @@ mod tests {
             allow_codecs: Some(vec!["definitely_not_a_real_codec".to_string()]),
             ..OpenOptions::default()
         };
-        let res = open_rgba_with(&c, Source::bytes(&bytes), &opts);
+        let res = open_image_with(&c, Source::bytes(&bytes), &opts);
         assert!(matches!(res, Err(Error::Restricted(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn deny_codec_is_checked_before_any_decode() {
+        // Header is a valid PPM but the payload is truncated: a decode
+        // would fail with a decode error. With the codec denied the
+        // answer must be `Restricted` — proof the check ran on the
+        // stream table before the decoder saw a byte.
+        let c = ctx();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"P6\n2 2\n255\n");
+        bytes.push(0);
+        let probe = probe_with(&c, Source::bytes(&bytes), &OpenOptions::default()).unwrap();
+        let codec = probe.streams[0].codec.clone();
+        let opts = OpenOptions {
+            deny_codecs: vec![codec],
+            ..OpenOptions::default()
+        };
+        let res = open_image_with(&c, Source::bytes(&bytes), &opts);
+        assert!(matches!(res, Err(Error::Restricted(_))), "got {res:?}");
+        // Without the restriction the same bytes are a decode failure,
+        // never a panic.
+        let res = open_image_with(&c, Source::bytes(&bytes), &OpenOptions::default());
+        assert!(res.is_err(), "truncated payload must fail");
+        assert!(!matches!(res, Err(Error::Restricted(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn image_deny_container_is_rejected() {
+        let c = ctx();
+        let bytes = tiny_ppm();
+        let opts = OpenOptions {
+            deny_containers: vec!["pbm".to_string()],
+            ..OpenOptions::default()
+        };
+        let res = open_image_file_with(&c, Source::bytes(&bytes), &opts);
+        assert!(matches!(res, Err(Error::Restricted(_))), "got {res:?}");
+    }
+
+    #[test]
+    fn open_image_returns_the_native_layout() {
+        let c = ctx();
+        let bytes = tiny_ppm();
+        let img = open_image_with(&c, Source::bytes(&bytes), &OpenOptions::default())
+            .expect("open PPM natively");
+        assert_eq!((img.width(), img.height()), (2, 2));
+        assert_eq!(img.format(), PixelFormat::Rgb24);
+        assert_eq!(&img.to_rgb8().unwrap()[0..3], &[255, 0, 0]);
+        // The flatteners agree with the native picture.
+        #[allow(deprecated)]
+        let rgba = open_rgba_with(&c, Source::bytes(&bytes), &OpenOptions::default()).unwrap();
+        assert_eq!(rgba.pixels, img.to_rgba8().unwrap());
+        assert_eq!(rgba, RgbaImage::from_image(&img).unwrap());
+        #[allow(deprecated)]
+        let rgb = open_rgb_with(&c, Source::bytes(&bytes), &OpenOptions::default()).unwrap();
+        assert!(rgb.is_rgb());
+        assert_eq!(rgb.pixels, img.as_packed().unwrap());
+    }
+
+    #[test]
+    fn open_image_file_reports_container_and_pictures() {
+        let c = ctx();
+        let bytes = tiny_ppm();
+        let file = open_image_file_with(&c, Source::bytes(&bytes), &OpenOptions::default())
+            .expect("open PPM file");
+        assert_eq!(file.container(), "pbm");
+        assert_eq!(file.len(), 1);
+        assert_eq!(file.primary().width(), 2);
+    }
+
+    #[test]
+    fn open_image_with_codec_allow_list_still_decodes() {
+        // The shared-reader header parse must leave the gateway a
+        // rewound, fully readable stream.
+        let c = ctx();
+        let bytes = tiny_ppm();
+        let probe = probe_with(&c, Source::bytes(&bytes), &OpenOptions::default()).unwrap();
+        let opts = OpenOptions {
+            allow_codecs: Some(vec![probe.streams[0].codec.clone()]),
+            allow_containers: Some(vec!["pbm".to_string()]),
+            ..OpenOptions::default()
+        };
+        let img = open_image_with(&c, Source::bytes(&bytes), &opts).expect("allowed");
+        assert_eq!(&img.to_rgba8().unwrap()[4..8], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn open_image_on_non_image_is_a_typed_error() {
+        let c = ctx();
+        // Text would score as a subtitle container; opaque garbage
+        // matches no probe at all.
+        let garbage = vec![0xA5u8; 4096];
+        let res = open_image_with(&c, Source::bytes(&garbage), &OpenOptions::default());
+        assert!(matches!(res, Err(Error::Probe(_))), "got {res:?}");
     }
 
     // ───────────────────────── probe ─────────────────────────

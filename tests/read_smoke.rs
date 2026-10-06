@@ -8,7 +8,7 @@
 
 use std::io::Write;
 
-use oxideav_io::{open, open_rgba, Opened};
+use oxideav_io::{open, open_image, open_image_file, Opened, RgbaImage};
 
 /// Minimal 2×2 binary PPM (P6, 8-bit RGB), top-down.
 /// Pixels: (0,0)=red (1,0)=white (0,1)=blue (1,1)=green.
@@ -29,14 +29,30 @@ fn write_temp_ppm() -> std::path::PathBuf {
 }
 
 #[test]
-fn open_rgba_path() {
+fn open_image_path_native_and_flattened() {
     let path = write_temp_ppm();
-    let img = open_rgba(&path).expect("decode PPM to RGBA");
+    let native = open_image(&path).expect("decode PPM natively");
+    #[allow(deprecated)]
+    let legacy = oxideav_io::open_rgba(&path).expect("decode PPM to RGBA");
     let _ = std::fs::remove_file(&path);
-    assert_eq!((img.width, img.height), (2, 2));
+    assert_eq!((native.width(), native.height()), (2, 2));
+    assert_eq!(native.format(), oxideav_core::PixelFormat::Rgb24);
+    let img = RgbaImage::from_image(&native).expect("flatten");
     assert_eq!(img.stride, 8);
     assert_eq!(img.pixels.len(), 16);
     assert_eq!(&img.pixels[0..4], &[255, 0, 0, 255]); // top-left red, opaque
+                                                      // The deprecated flattener is the same picture.
+    assert_eq!(legacy, img);
+}
+
+#[test]
+fn open_image_file_path() {
+    let path = write_temp_ppm();
+    let file = open_image_file(&path).expect("decode PPM file");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(file.container(), "pbm");
+    assert_eq!(file.len(), 1);
+    assert_eq!(file.primary().to_rgb8().unwrap()[0..3], [255, 0, 0]);
 }
 
 #[test]
