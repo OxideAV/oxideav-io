@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/OxideAV/oxideav-io/compare/v0.1.1...v0.1.2) - 2026-10-06
+
+### Other
+
+- ride the oxideav-image gateway for every still-image path
+
 ### Changed
 
 - **Images ride `oxideav-image`.** Every still-image decode, pixel-layout
