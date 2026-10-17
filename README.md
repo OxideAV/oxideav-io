@@ -27,7 +27,7 @@ match open("input.png")? {
 
 | Variant          | Produced for                              | Eager? |
 |------------------|-------------------------------------------|--------|
-| `Image(RgbaImage)` | still images (PNG, JPEG, BMP, HEIC, GIF, TIFF, …), packed RGBA8888 — see [Images ride oxideav-image](#images-ride-oxideav-image) for the native picture | yes |
+| `Image(RgbaImage)` | still images (PNG, JPEG, BMP, HEIC, GIF, TIFF, …), packed RGBA8888 with the picture's metadata blobs and an indexed picture's palette alpha composited in — see [Images ride oxideav-image](#images-ride-oxideav-image) for the native picture | yes |
 | `Vector(VectorFrame)` | SVG / vector graphics                  | yes |
 | `Scene(Scene)`   | PDF documents (one entry per page) — `pdf` feature | yes |
 | `Mesh(Scene3D)`  | 3D models (STL/OBJ/glTF/GLB/USDZ/FBX) — `mesh` feature | yes |
@@ -53,10 +53,25 @@ let av   = oxideav_io::open_media("clip.mp4")?;       // always lazy
 deprecated thin flatteners of `open_image`.
 
 Every opener has a `_with(ctx, source, opts)` sibling and takes an
-[`OpenOptions`] that can **restrict which container / codec is allowed to
-run** (`allow_containers` / `deny_containers` / `allow_codecs` /
-`deny_codecs`) — handy for sandboxing untrusted input to a known-safe
-format set.
+[`OpenOptions`] (built with `OpenOptions::new()` / `eager()` and
+`with_*` builders — the struct is `#[non_exhaustive]`) that can
+**restrict which container / codec is allowed to run**
+(`with_allow_containers` / `with_deny_containers` / `with_allow_codecs`
+/ `with_deny_codecs` — a refusal is `Error::Restricted`), **strip
+metadata** (`without_metadata()`, `with_stripped_blobs([BlobKind::EXIF])`),
+**cap the decode** (`with_max_pixels(n)` refuses an oversized stream
+from its geometry before any decoder exists) and pass **decoder
+options** (`with_decoder_option`) — handy for sandboxing untrusted
+input to a known-safe format set.
+
+```rust
+use oxideav_core::BlobKind;
+use oxideav_io::OpenOptions;
+let opts = OpenOptions::eager()
+    .with_allow_containers(["png", "jpeg", "heif"])
+    .with_stripped_blobs([BlobKind::EXIF])   // shed location data
+    .with_max_pixels(50_000_000);
+```
 
 ## Images ride oxideav-image
 
@@ -73,11 +88,15 @@ gateway is:
 * the **discrimination ladder** — PDF → `Scene`, 3D → `Mesh`, vector →
   `Vector`, single-frame video → `Image`, everything else → lazy
   `Media`;
-* the **allow / deny container + codec lists** of `OpenOptions`,
-  enforced *before* the gateway runs: the container is probed and
-  checked, and when the codec lists restrict anything the stream table
-  is read (a header parse, no decode) and every stream's codec id is
-  checked — a denied codec never decodes a byte.
+* the **allow / deny container + codec lists** of `OpenOptions`, handed
+  to the gateway's own (`OpenOptions::to_image_options` →
+  `oxideav_image::OpenOptions::with_allow_*` / `with_deny_*`): the
+  container is checked right after the probe, every video stream's
+  codec from the stream table before a decoder exists — a refused file
+  costs one header parse and comes back as `Error::Restricted`. The
+  unified `open` / `probe` / `ping_format` paths apply the same lists
+  themselves (the fast path only the container lists: it never reads a
+  stream table).
 
 What you get:
 
@@ -86,14 +105,56 @@ What you get:
 | `open_image(path)` / `open_image_with(ctx, src, opts)` | `oxideav_image::Image` | the primary picture in its native layout (`width()`, `height()`, `format()`, `palette()`, `color_signal()`, `to_rgba8()`, `to_rgb8()`, `to_format(..)`, `crop(..)`); only the first picture is decoded |
 | `open_image_file(path)` / `open_image_file_with(..)` | `oxideav_image::ImageFile` | every picture in file order with per-frame `delay()` / `timestamp()`, plus `container()` and `metadata()` |
 | `open(path)` → `Opened::Image(RgbaImage)` | packed RGBA8888 | unchanged shape; built from the native picture |
-| `save_image_with(ctx, &Image, sink, &SaveOptions)` | — | encode a native picture without flattening it first |
-| `RgbaImage::from_image` / `from_image_rgb` / `to_image` / `TryFrom` both ways | — | the bridge between the flattened buffer and the native picture |
+| `save_image_with(ctx, &Image, sink, &SaveOptions)` | — | encode a native picture without flattening it first; its blobs are written |
+| `save_rgba_with(ctx, &RgbaImage, sink, &SaveOptions)` | — | the flattened-buffer save (`save_with` for `Opened::Image`); the buffer's `blobs` are written |
+| `save_image(&Image, path)` / `save_rgba(&RgbaImage, path)` | — | zero-config forms, container from the extension |
+| `RgbaImage::from_image` / `from_image_rgb` / `to_image` / `TryFrom` both ways | — | the bridge between the flattened buffer and the native picture; blobs lifted and re-attached |
 
 `Image` and `ImageFile` are re-exported at the crate root, so callers
 need no direct `oxideav-image` dependency to name them. Errors from the
 gateway fold onto this crate's variants (`UnknownFormat` → `Probe` on
-read, `Unsupported` on write; `InvalidData` / `NoImage` /
-`LimitExceeded` → `Invalid`; registry errors as before).
+read, `Unsupported` on write; `Restricted` → `Restricted`; `InvalidData`
+/ `NoImage` / `LimitExceeded` → `Invalid`; registry errors as before).
+
+### Metadata and palette alpha
+
+Opaque payloads a format embeds — an ICC profile, Exif, XMP, IPTC, a
+custom kind — are framework `MetadataBlob`s (core 0.1.40) and reach
+every io shape:
+
+* the native `Image` keeps the gateway's two levels (`frame_blobs()` /
+  `stream_blobs()`) and the resolved view (`blobs()`, `icc()`, `exif()`,
+  `xmp()`, `iptc()`, `blob(&kind)`: the frame's blobs first, then the
+  stream blobs of kinds the frame does not carry); `ImageFile` the
+  stream's (`blobs()`, `stream_blobs(i)`, the same accessors);
+* the flattened `RgbaImage` — hence `Opened::Image`, `open_rgba*` /
+  `open_rgb*` and the transcode chain — carries `blobs: Vec<MetadataBlob>`
+  with the same accessors plus `with_blob(s)` / `push_blob` /
+  `retain_blobs` / `strip_metadata` / `without_metadata`.
+
+**Ruling:** on the flattened shape the blobs live on `RgbaImage` itself,
+not on the surrounding `Opened` — the buffer is the unit that is saved,
+transformed and handed around, and `Opened::Image` has no second slot.
+`RgbaImage::from_image` lifts the native picture's *resolved* list, so
+flattening never loses a kind; `to_image` attaches them as the
+picture's own, which a single-picture encode promotes to the stream
+level (the gateway's rule) — so `save_with(&Opened::Image(img), ..)`
+writes exactly what `open` read, unless `SaveOptions` strips or
+replaces it.
+
+An indexed (`Pal8`) picture's palette alpha (GIF transparent index, PNG
+`tRNS`, TGA 32-bit colour maps) is composited into the RGBA flattening
+— a transparent entry yields alpha `0` — and dropped by the RGB24 one
+(`from_image_rgb`, `open_rgb*`), as the gateway's views do.
+
+What persists on disk is the format crate's business, not this
+crate's: the gateway's survey (its README, *Survey*) lists which of the
+25 image crates push blobs and palette alpha through the registry. The
+`tests/metadata_chain.rs` suite pins what io guarantees against the
+real fleet — HEIF persists ICC / Exif / XMP today; a png → jpg → heic
+chain through io never corrupts or duplicates a blob and forwards the
+list to the next hop; `without_metadata()` drops them on open and on
+save.
 
 ## Probing (identify without decoding)
 
@@ -212,6 +273,15 @@ would require a decode, **still images report as `MediaKind::Media`**
 (with one video-kind stream), not as a distinct image kind — that
 distinction is made by `open()` *after* decoding.
 
+Container names are the registry's, the same ones the gateway's
+`ImageFile::container()` reports (`tests/image_containers.rs` pins
+`ping_format` / `probe` / gateway agreement over all 25 image crates):
+a JPEG is `jpeg`, a PPM `pbm`, an OpenEXR `openexr`, a JPEG 2000
+codestream `jpeg2000` and its box file `jp2`, and **every HEIF-family
+brand — `.heic`, `.heif`, `.avif` — is container `heif` with stream
+codec `heif`**; the brand is container metadata (`probe.meta("major_brand")`),
+so the allow / deny lists cannot single a brand out.
+
 Both tiers use the process-wide `oxideav-meta` context (the `full`
 feature). The lean forms `ping_format_with(ctx, source, &OpenOptions)` and
 `probe_with(ctx, source, &OpenOptions)` take a caller-supplied
@@ -234,9 +304,22 @@ save(&opened, "photo.jpg")?;      // re-encode PNG → JPEG by extension
 ```
 
 `save_with(ctx, &opened, sink, &SaveOptions)` takes a `Sink`
-(`Sink::Path` / `Sink::Writer(Box<dyn Write + Send>)` /
-`Sink::Buffer(&mut Vec<u8>)`) and a `SaveOptions { container, codec,
-pixel, quality }`, mapped onto `oxideav_image::encode`:
+(`Sink::Path` / `Sink::Writer(Box<dyn Write + Send>)` — or
+`Sink::writer(w)` — / `Sink::Buffer(&mut Vec<u8>)`) and a `SaveOptions`
+(`SaveOptions::new()` and `with_*` builders; `#[non_exhaustive]`)
+mapped onto `oxideav_image::encode`:
+
+```rust
+use oxideav_core::{BlobKind, MetadataBlob};
+use oxideav_io::{PixelChoice, SaveOptions};
+# let profile = vec![0u8; 4];
+let opts = SaveOptions::new()
+    .with_container("heic")
+    .with_quality(85)
+    .with_blob(MetadataBlob::new(BlobKind::ICC, profile)) // replaces the source's ICC
+    .with_stripped_blobs([BlobKind::EXIF])                 // withhold the source's Exif
+    .with_pixel(PixelChoice::Auto);
+```
 
 * `container` is a registered container name **or a file extension**
   (`"png"`, `"jpeg"`, `"jpg"`, `"heic"`, …); `None` derives it from the
@@ -250,7 +333,14 @@ pixel, quality }`, mapped onto `oxideav_image::encode`:
   layout and fail loudly if it is refused.
 * `quality` reaches the encoder only when its declared option schema
   has a `quality` field (lossless encoders would reject the unknown
-  option).
+  option); `with_option(name, value)` forwards any other declared
+  encoder option verbatim (an undeclared name is the encoder's refusal,
+  nothing is committed).
+* the picture's blobs are handed to the encoder at both levels;
+  `with_blob(b)` writes `b` and replaces the source blob of its kind —
+  at both levels, so the replacement holds whichever level the encoder
+  reads — `without_metadata()` / `with_stripped_blobs(kinds)` withhold
+  the source's (blobs given in the options are still written).
 
 The whole container is assembled in memory first, so a seekable muxer
 works even over a non-seekable writer. 3D meshes re-encode through the
@@ -285,11 +375,14 @@ an `Unsupported` error today.
 
 `Source` accepts whatever you have:
 
-* `Source::Path(p)` — a filesystem path, opened directly;
+* `Source::Path(p)` — a filesystem path, opened behind a `BufReader`;
 * `Source::Uri(u)` — resolved through the context's `SourceRegistry`
   (`file://`, `mem://`, `data:`, `http(s)://`, …);
-* `Source::Bytes(b)` — an in-memory buffer;
-* `Source::Reader(r)` — any `Read + Seek + Send` you already hold.
+* `Source::Bytes(b)` — an in-memory buffer (`Source::bytes(&[u8])`);
+* `Source::Reader(r)` — any `Read + Seek + Send` you already hold, as
+  is; `Source::reader(r)` boxes one, `Source::buffered(r)` wraps it in a
+  `BufReader` first (the right shape for an unbuffered file or
+  socket-backed seekable stream).
 
 ### Seekability contract
 
@@ -338,7 +431,13 @@ resolve; inside the workspace it always resolves via `[patch.crates-io]`.
 
 The **read** facade (Phase 1), the **write** facade (Phase 2), and the
 still-image **transcode** path (Phase 3) are all in place, with the
-still-image half riding the `oxideav-image` gateway since round 473. The
+still-image half riding the `oxideav-image` gateway since round 473 and
+adopting its whole 0.0.4 surface since round 477 (allow / deny lists on
+the gateway, metadata blobs and palette alpha on every shape, strip /
+replace rules on open and save, the pixel budget, buffered sources).
+The lean `registry` slice — what the crate's own CI builds — drives the
+whole pipeline through an in-crate test container + codec, so every
+facade behaviour above is covered without the sibling fleet. The
 **probe** subsystem is contract-hardened: an enforced `ping_format`
 read budget, a fixture-backed coverage matrix (PNG / JPEG / PBM / DDS /
 WAV / AVI / Matroska / MP3 / SRT / WebVTT / Y4M / SVG / PDF / STL —
