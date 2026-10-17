@@ -996,3 +996,157 @@ mod tests {
         assert!(matches!(res, Err(Error::Restricted(_))), "got {res:?}");
     }
 }
+
+/// Facade behaviour on the lean `registry` slice, driven by the
+/// in-crate test format (`crate::testfmt`) — what the crate's own CI
+/// runs.
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use crate::testfmt;
+    use oxideav_core::{BlobKind, MetadataBlob};
+
+    /// 2×1 indexed picture: entry 0 opaque red, entry 1 transparent
+    /// blue; an ICC blob on the stream, an Exif blob on the picture.
+    fn fixture() -> Vec<u8> {
+        testfmt::file(
+            PixelFormat::Pal8,
+            2,
+            1,
+            vec![0, 1],
+            &[[255, 0, 0, 255], [0, 0, 255, 0]],
+            vec![MetadataBlob::new(BlobKind::ICC, vec![1u8; 16])],
+            vec![MetadataBlob::new(BlobKind::EXIF, vec![2u8; 8])],
+        )
+    }
+
+    #[test]
+    fn ping_probe_and_open_agree_on_the_container() {
+        let ctx = testfmt::context();
+        let bytes = fixture();
+        let ping = ping_format_with(&ctx, Source::bytes(&bytes), &OpenOptions::default()).unwrap();
+        assert_eq!(
+            (ping.kind, ping.format.as_deref()),
+            (MediaKind::Media, Some("iotest"))
+        );
+        let probe = probe_with(&ctx, Source::bytes(&bytes), &OpenOptions::default()).unwrap();
+        assert_eq!(probe.container.as_deref(), Some("iotest"));
+        assert_eq!(probe.streams.len(), 1);
+        assert_eq!(probe.streams[0].codec, "iotest");
+        assert_eq!(probe.dimensions(), Some((2, 1)));
+        let file =
+            open_image_file_with(&ctx, Source::bytes(&bytes), &OpenOptions::default()).unwrap();
+        assert_eq!(file.container(), "iotest");
+        assert_eq!(file.len(), 1);
+    }
+
+    #[test]
+    fn native_picture_carries_palette_alpha_and_both_blob_levels() {
+        let ctx = testfmt::context();
+        let bytes = fixture();
+        let img = open_image_with(&ctx, Source::bytes(&bytes), &OpenOptions::default()).unwrap();
+        assert_eq!(img.format(), PixelFormat::Pal8);
+        assert!(img.has_palette_alpha());
+        assert_eq!(img.icc(), Some(&[1u8; 16][..]));
+        assert_eq!(img.exif(), Some(&[2u8; 8][..]));
+        assert_eq!(img.stream_blobs().len(), 1);
+        assert_eq!(img.frame_blobs().len(), 1);
+    }
+
+    #[test]
+    fn unified_open_composites_palette_alpha() {
+        let ctx = testfmt::context();
+        let bytes = fixture();
+        match open_with(&ctx, Source::bytes(&bytes), &OpenOptions::eager()).unwrap() {
+            Opened::Image(img) => {
+                assert_eq!((img.width, img.height, img.stride), (2, 1, 8));
+                assert_eq!(img.pixels, vec![255, 0, 0, 255, 0, 0, 255, 0]);
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn allow_and_deny_lists_are_restricted_on_every_entry_point() {
+        let ctx = testfmt::context();
+        let bytes = fixture();
+        let deny_container = OpenOptions {
+            deny_containers: vec!["IOTEST".into()],
+            ..OpenOptions::default()
+        };
+        let allow_other_container = OpenOptions {
+            allow_containers: Some(vec!["png".into()]),
+            ..OpenOptions::default()
+        };
+        let deny_codec = OpenOptions {
+            deny_codecs: vec!["iotest".into()],
+            ..OpenOptions::default()
+        };
+        let allow_other_codec = OpenOptions {
+            allow_codecs: Some(vec!["png".into()]),
+            ..OpenOptions::default()
+        };
+        for (name, opts) in [
+            ("deny container", &deny_container),
+            ("allow other container", &allow_other_container),
+            ("deny codec", &deny_codec),
+            ("allow other codec", &allow_other_codec),
+        ] {
+            let r = open_image_with(&ctx, Source::bytes(&bytes), opts);
+            assert!(
+                matches!(r, Err(Error::Restricted(_))),
+                "{name}: open_image {r:?}"
+            );
+            let r = open_image_file_with(&ctx, Source::bytes(&bytes), opts);
+            assert!(
+                matches!(r, Err(Error::Restricted(_))),
+                "{name}: open_image_file {r:?}"
+            );
+            let r = open_with(&ctx, Source::bytes(&bytes), opts);
+            assert!(matches!(r, Err(Error::Restricted(_))), "{name}: open {r:?}");
+            let r = probe_with(&ctx, Source::bytes(&bytes), opts);
+            assert!(
+                matches!(r, Err(Error::Restricted(_))),
+                "{name}: probe {r:?}"
+            );
+        }
+        // The fast path never reads the stream table, so only the
+        // container lists apply to it.
+        for (name, opts) in [
+            ("deny container", &deny_container),
+            ("allow other container", &allow_other_container),
+        ] {
+            let r = ping_format_with(&ctx, Source::bytes(&bytes), opts);
+            assert!(matches!(r, Err(Error::Restricted(_))), "{name}: ping {r:?}");
+        }
+        for opts in [&deny_codec, &allow_other_codec] {
+            assert!(ping_format_with(&ctx, Source::bytes(&bytes), opts).is_ok());
+        }
+        // Matching lists let the file through.
+        let ok = OpenOptions {
+            allow_containers: Some(vec!["iotest".into()]),
+            allow_codecs: Some(vec!["IOTEST".into()]),
+            ..OpenOptions::default()
+        };
+        assert!(open_image_with(&ctx, Source::bytes(&bytes), &ok).is_ok());
+    }
+
+    #[test]
+    fn gateway_options_carry_the_lists() {
+        let opts = OpenOptions {
+            allow_containers: Some(vec!["a".into()]),
+            deny_containers: vec!["b".into()],
+            allow_codecs: Some(vec!["c".into()]),
+            deny_codecs: vec!["d".into()],
+            ..OpenOptions::default()
+        };
+        let g = opts.to_image_options();
+        assert_eq!(g.allow_containers.as_deref(), Some(&["a".to_string()][..]));
+        assert_eq!(g.deny_containers, vec!["b".to_string()]);
+        assert_eq!(g.allow_codecs.as_deref(), Some(&["c".to_string()][..]));
+        assert_eq!(g.deny_codecs, vec!["d".to_string()]);
+        let g = OpenOptions::default().to_image_options();
+        assert!(g.allow_containers.is_none() && g.deny_containers.is_empty());
+        assert!(g.allow_codecs.is_none() && g.deny_codecs.is_empty());
+    }
+}

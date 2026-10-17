@@ -463,3 +463,86 @@ mod tests {
         assert_eq!(&buf[0..4], &[0x89, b'P', b'N', b'G']);
     }
 }
+
+/// Save behaviour on the lean `registry` slice, driven by the in-crate
+/// test format (`crate::testfmt`).
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use crate::open::{open_image_file_with, open_with, OpenOptions};
+    use crate::source::Source;
+    use crate::testfmt;
+
+    fn sample() -> RgbaImage {
+        RgbaImage {
+            width: 2,
+            height: 1,
+            pixels: vec![1, 2, 3, 255, 4, 5, 6, 0],
+            stride: 8,
+        }
+    }
+
+    #[test]
+    fn flattened_save_round_trips_and_forwards_quality() {
+        let ctx = testfmt::context();
+        let mut buf = Vec::new();
+        let opts = SaveOptions {
+            container: Some(testfmt::EXT.into()),
+            quality: Some(77),
+            ..SaveOptions::default()
+        };
+        save_with(
+            &ctx,
+            &Opened::Image(sample()),
+            Sink::Buffer(&mut buf),
+            &opts,
+        )
+        .unwrap();
+        let file =
+            open_image_file_with(&ctx, Source::bytes(&buf), &OpenOptions::default()).unwrap();
+        assert_eq!(file.container(), testfmt::NAME);
+        assert_eq!(
+            file.metadata()[0],
+            ("quality".to_string(), "77".to_string())
+        );
+        match open_with(&ctx, Source::bytes(&buf), &OpenOptions::eager()).unwrap() {
+            Opened::Image(img) => assert_eq!(img, sample()),
+            other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forced_rgb_drops_alpha_and_unknown_format_is_unsupported() {
+        let ctx = testfmt::context();
+        let mut buf = Vec::new();
+        let opts = SaveOptions {
+            container: Some(testfmt::NAME.into()),
+            pixel: PixelChoice::Rgb,
+            ..SaveOptions::default()
+        };
+        save_with(
+            &ctx,
+            &Opened::Image(sample()),
+            Sink::Buffer(&mut buf),
+            &opts,
+        )
+        .unwrap();
+        let img = crate::open::open_image_with(&ctx, Source::bytes(&buf), &OpenOptions::default())
+            .unwrap();
+        assert_eq!(img.format(), PixelFormat::Rgb24);
+        assert_eq!(img.to_rgb8().unwrap(), vec![1, 2, 3, 4, 5, 6]);
+        let mut buf = Vec::new();
+        let opts = SaveOptions {
+            container: Some("nope".into()),
+            ..SaveOptions::default()
+        };
+        let r = save_with(
+            &ctx,
+            &Opened::Image(sample()),
+            Sink::Buffer(&mut buf),
+            &opts,
+        );
+        assert!(matches!(r, Err(Error::Unsupported(_))), "{r:?}");
+        assert!(buf.is_empty());
+    }
+}

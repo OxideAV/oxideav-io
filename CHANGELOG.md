@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An in-crate test container + codec (`iotest`, tests only) that
+  carries stream and per-picture blobs, a palette with its alpha record
+  and the forwarded `quality`, so the lean `registry` slice the crate's
+  CI builds now drives the whole facade pipeline — ping / probe / open /
+  flatten / save, allow / deny refusals on every entry point — without
+  `oxideav-meta` or any format crate.
 - `open_image` / `open_image_with` → `oxideav_image::Image` (primary
   picture, native layout; only the first picture is decoded) and
   `open_image_file` / `open_image_file_with` → `oxideav_image::ImageFile`

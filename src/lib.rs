@@ -77,6 +77,9 @@ mod probe;
 mod save;
 #[cfg(feature = "registry")]
 mod source;
+/// The in-crate test container + codec (see its docs); tests only.
+#[cfg(all(test, feature = "registry"))]
+pub(crate) mod testfmt;
 #[cfg(feature = "registry")]
 mod transcode;
 
