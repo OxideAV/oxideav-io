@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Allow / deny lists ride the gateway.** `OpenOptions`'s
+  `allow_containers` / `deny_containers` / `allow_codecs` / `deny_codecs`
+  are handed to `oxideav_image::OpenOptions` (`with_allow_*` /
+  `with_deny_*`, exposed as `OpenOptions::to_image_options`) instead of
+  being enforced by a shared-reader header parse in this crate; the
+  gateway's `ImageError::Restricted` maps to `Error::Restricted` (it
+  used to fold into `Decode`). Same contract: the container is checked
+  right after the probe, every video stream's codec from the stream
+  table before a decoder exists.
 - **Images ride `oxideav-image`.** Every still-image decode, pixel-layout
   conversion, encode and mux goes through the `oxideav-image` gateway
   (Layer 2 of `IMAGE_CRATE_API.md`); the crate's own frame packing

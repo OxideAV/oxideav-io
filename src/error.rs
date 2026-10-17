@@ -77,7 +77,9 @@ impl From<std::io::Error> for Error {
 
 /// The gateway's errors fold onto the facade's variants: `Io` and
 /// `Core` keep their meaning (`Core` through the `oxideav_core::Error`
-/// mapping below), `UnknownFormat` is a probe failure, `NoImage` /
+/// mapping below), `UnknownFormat` is a probe failure, `Restricted` is
+/// the allow / deny refusal of [`crate::OpenOptions`] (the lists are
+/// handed to the gateway, which enforces them), `NoImage` /
 /// `InvalidData` / `LimitExceeded` are facade-level invariants, and
 /// `Unsupported` stays `Unsupported`. The save path remaps
 /// `UnknownFormat` to `Unsupported` itself (an extension no muxer
@@ -90,6 +92,7 @@ impl From<oxideav_image::ImageError> for Error {
             Ie::Io(e) => Error::Io(e),
             Ie::Core(e) => Error::from(e),
             Ie::UnknownFormat(m) => Error::Probe(m),
+            Ie::Restricted(m) => Error::Restricted(m),
             Ie::Unsupported(m) => Error::Unsupported(m),
             Ie::NoImage(m) | Ie::InvalidData(m) | Ie::LimitExceeded(m) => Error::Invalid(m),
             other => Error::Decode(other.to_string()),
@@ -108,5 +111,38 @@ impl From<oxideav_core::Error> for Error {
             Ce::FormatNotFound(m) => Error::Probe(format!("no demuxer for format '{m}'")),
             other => Error::Decode(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_errors_keep_their_meaning() {
+        use oxideav_image::ImageError as Ie;
+        assert!(matches!(
+            Error::from(Ie::Restricted("png".into())),
+            Error::Restricted(m) if m == "png"
+        ));
+        assert!(matches!(
+            Error::from(Ie::UnknownFormat("x".into())),
+            Error::Probe(_)
+        ));
+        assert!(matches!(
+            Error::from(Ie::LimitExceeded("x".into())),
+            Error::Invalid(_)
+        ));
+        assert!(matches!(
+            Error::from(Ie::Unsupported("x".into())),
+            Error::Unsupported(_)
+        ));
+        assert!(matches!(
+            Error::from(Ie::Core(oxideav_core::Error::FormatNotFound("q".into()))),
+            Error::Probe(_)
+        ));
+        let io = Error::from(Ie::Io(std::io::Error::other("boom")));
+        assert!(matches!(io, Error::Io(_)));
+        assert!(std::error::Error::source(&io).is_some());
     }
 }

@@ -2,8 +2,6 @@
 //! openers, all built on the `oxideav-core` registries.
 
 use std::collections::VecDeque;
-use std::io::{Read, Seek, SeekFrom};
-use std::sync::{Arc, Mutex};
 
 use oxideav_core::{Decoder, Demuxer, Frame, PixelFormat, ReadSeek, RuntimeContext, StreamInfo};
 use oxideav_image::{Image, ImageFile};
@@ -49,6 +47,29 @@ impl OpenOptions {
             eager_image: true,
             ..Self::default()
         }
+    }
+
+    /// The gateway options the still-image openers hand to
+    /// `oxideav_image::decode_reader`: the allow / deny container and
+    /// codec lists as the gateway's own (`with_allow_containers` and
+    /// friends; a refusal is `ImageError::Restricted`, mapped to
+    /// [`Error::Restricted`]). The extension hint and frame limit are
+    /// added by the opener.
+    pub fn to_image_options(&self) -> oxideav_image::OpenOptions {
+        let mut g = oxideav_image::OpenOptions::new();
+        if let Some(allow) = &self.allow_containers {
+            g = g.with_allow_containers(allow.iter().cloned());
+        }
+        if !self.deny_containers.is_empty() {
+            g = g.with_deny_containers(self.deny_containers.iter().cloned());
+        }
+        if let Some(allow) = &self.allow_codecs {
+            g = g.with_allow_codecs(allow.iter().cloned());
+        }
+        if !self.deny_codecs.is_empty() {
+            g = g.with_deny_codecs(self.deny_codecs.iter().cloned());
+        }
+        g
     }
 }
 
@@ -543,10 +564,11 @@ fn open_registry(
 /// Only the first picture is decoded (`max_frames = 1`); for every
 /// frame of an animation / burst / multi-page file, the container name
 /// and its metadata, use [`open_image_file_with`]. The allow / deny
-/// lists of `opts` are enforced before the gateway runs: the container
-/// is probed and checked, and when the codec lists restrict anything
-/// the stream table is read (a header parse, no decode) and every
-/// stream's codec is checked — a denied codec never gets to decode.
+/// lists of `opts` are handed to the gateway
+/// ([`OpenOptions::to_image_options`]), which checks the container
+/// right after its probe and every video stream's codec from the
+/// stream table before a decoder exists — a refused file costs one
+/// header parse and comes back as [`Error::Restricted`].
 pub fn open_image_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Result<Image> {
     let file = open_image_file_inner(ctx, src, opts, Some(1))?;
     Ok(file.into_primary())
@@ -572,8 +594,7 @@ fn open_image_file_inner(
 ) -> Result<ImageFile> {
     let ext = opts.ext_hint.clone().or_else(|| src.ext_hint());
     let reader = src.into_read_seek(ctx)?;
-    let reader = admit_image_reader(ctx, reader, ext.as_deref(), opts)?;
-    let mut gopts = oxideav_image::OpenOptions::new();
+    let mut gopts = opts.to_image_options();
     if let Some(e) = ext {
         gopts = gopts.with_ext_hint(e);
     }
@@ -581,82 +602,6 @@ fn open_image_file_inner(
         gopts = gopts.with_max_frames(n);
     }
     Ok(oxideav_image::decode_reader(ctx, reader, &gopts)?)
-}
-
-/// Enforce [`OpenOptions`]'s allow / deny lists on a reader about to be
-/// handed to the gateway (which has no such option): probe the
-/// container and check its name; when the codec lists restrict
-/// anything, open the demuxer on a shared handle, check every stream's
-/// codec id against them, drop the demuxer, and rewind. Returns the
-/// reader positioned at byte 0, ready for `decode_reader`.
-fn admit_image_reader(
-    ctx: &RuntimeContext,
-    mut reader: Box<dyn ReadSeek>,
-    ext: Option<&str>,
-    opts: &OpenOptions,
-) -> Result<Box<dyn ReadSeek>> {
-    let cname = ctx
-        .containers
-        .probe_input(reader.as_mut(), ext)
-        .map_err(|e| Error::probe(e.to_string()))?;
-    if !permitted(&cname, &opts.allow_containers, &opts.deny_containers) {
-        return Err(Error::restricted(format!(
-            "container '{cname}' is not permitted by the open options"
-        )));
-    }
-    if opts.allow_codecs.is_none() && opts.deny_codecs.is_empty() {
-        reader.seek(SeekFrom::Start(0))?;
-        return Ok(reader);
-    }
-    // The demuxer takes ownership of its reader, so share it: one
-    // handle for the header parse, the other for the gateway.
-    let shared = SharedReader::new(reader);
-    {
-        let demuxer = ctx
-            .containers
-            .open_demuxer(&cname, Box::new(shared.clone()), &ctx.codecs)?;
-        for s in demuxer.streams() {
-            let codec_id = s.params.codec_id.as_str().to_string();
-            if !permitted(&codec_id, &opts.allow_codecs, &opts.deny_codecs) {
-                return Err(Error::restricted(format!(
-                    "codec '{codec_id}' is not permitted by the open options"
-                )));
-            }
-        }
-    }
-    let mut shared = shared;
-    shared.seek(SeekFrom::Start(0))?;
-    Ok(Box::new(shared))
-}
-
-/// A seekable reader two owners can hold in turn (the demuxer used for
-/// the allow / deny header parse, then the gateway). Never used by both
-/// at once, so the mutex only exists to satisfy `Send`.
-#[derive(Clone)]
-struct SharedReader(Arc<Mutex<Box<dyn ReadSeek>>>);
-
-impl SharedReader {
-    fn new(reader: Box<dyn ReadSeek>) -> Self {
-        SharedReader(Arc::new(Mutex::new(reader)))
-    }
-}
-
-impl Read for SharedReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| std::io::Error::other("SharedReader: poisoned lock"))?
-            .read(buf)
-    }
-}
-
-impl Seek for SharedReader {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        self.0
-            .lock()
-            .map_err(|_| std::io::Error::other("SharedReader: poisoned lock"))?
-            .seek(pos)
-    }
 }
 
 // ───────────────────────── specialized openers ─────────────────────────
