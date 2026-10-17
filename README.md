@@ -261,6 +261,13 @@ println!("length: {:?}", info.duration());              // std::time::Duration
 `duration()` / `is_video()` / `is_audio()` / `is_subtitle()` round out
 the set.)
 
+Stream-level metadata blobs are in the header too: each `StreamInfo`
+carries `blobs` (what the demuxer declared on the stream, after the
+`OpenOptions` strip rules) with `icc()` / `exif()` / `xmp()` / `iptc()` /
+`blob(&kind)`, and `Probe::blobs()` / `icc()` / … read the first video
+stream's — so a profile or an XMP packet can be inspected without
+decoding a pixel. Per-picture blobs need a decode (`open_image*`).
+
 The discrimination ladder mirrors `open()`:
 
 1. PDF magic (`%PDF-`) or `.pdf` extension → `MediaKind::Scene`;

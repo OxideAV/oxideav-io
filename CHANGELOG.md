@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`probe` surfaces stream-level blobs.** `StreamInfo::blobs` (what the
+  demuxer declared on the stream, read from the header, after the
+  `OpenOptions` strip rules) with `blob(&kind)` / `icc()` / `exif()` /
+  `xmp()` / `iptc()` / `has_metadata()`, and the same accessors on
+  `Probe` for its first video stream (`Probe::blobs()`).
+- `TranscodeOptions::new()` / `with_open` / `with_save` /
+  `with_transform(s)` builders.
 - **`SaveOptions` adopts the gateway's knobs**: `blobs`
   (`with_blob` / `with_blobs` — written on top of the picture's own,
   replacing the source blob of the same kind), `strip_metadata`
@@ -119,6 +126,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (breaking)
 
+- `Probe`, `StreamInfo`, `PingFormat` (facade-produced records, read by
+  field), `TranscodeOptions` and the `Transform` enum are
+  `#[non_exhaustive]`.
 - `SaveOptions` is `#[non_exhaustive]`: build it with `SaveOptions::new()`
   and the `with_*` builders instead of a struct literal.
 - `OpenOptions` is `#[non_exhaustive]`: build it with `OpenOptions::new()`

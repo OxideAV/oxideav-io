@@ -19,6 +19,7 @@ use crate::source::{Sink, Source};
 /// A single still-image transformation applied between decode and
 /// encode. The chain runs in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Transform {
     /// Rescale to `width × height`. Requires the `transforms` feature
     /// (enabled by default via `full`); without it this variant errors.
@@ -30,7 +31,11 @@ pub enum Transform {
 
 /// Knobs for a transcode operation: how to open the input, the
 /// transform chain, and how to save the output.
+///
+/// `#[non_exhaustive]`: build with [`TranscodeOptions::new`] and the
+/// `with_*` builders.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct TranscodeOptions {
     /// Options forwarded to the read facade.
     pub open: OpenOptions,
@@ -39,6 +44,38 @@ pub struct TranscodeOptions {
     /// Still-image transforms applied in order between decode and
     /// encode.
     pub transforms: Vec<Transform>,
+}
+
+impl TranscodeOptions {
+    /// Defaults: open as the read facade would, no transforms, save by
+    /// the sink's extension.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Options for the read side.
+    pub fn with_open(mut self, open: OpenOptions) -> Self {
+        self.open = open;
+        self
+    }
+
+    /// Options for the write side.
+    pub fn with_save(mut self, save: SaveOptions) -> Self {
+        self.save = save;
+        self
+    }
+
+    /// Append one transform to the chain.
+    pub fn with_transform(mut self, t: Transform) -> Self {
+        self.transforms.push(t);
+        self
+    }
+
+    /// Replace the transform chain.
+    pub fn with_transforms(mut self, transforms: Vec<Transform>) -> Self {
+        self.transforms = transforms;
+        self
+    }
 }
 
 /// Transcode a source to a sink against a caller-supplied context.

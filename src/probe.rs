@@ -77,6 +77,7 @@ impl From<oxideav_core::MediaType> for StreamKind {
 /// this?"; reach for [`probe`](crate::probe) when you want stream/size/
 /// duration detail.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PingFormat {
     /// The broad category resolved by the discrimination ladder.
     pub kind: MediaKind,
@@ -91,7 +92,10 @@ pub struct PingFormat {
 ///
 /// Populated from the demuxer's stream table (which a container fills
 /// from its header), so building one never decodes a frame.
+///
+/// `#[non_exhaustive]`: produced by the facade, read by field.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct StreamInfo {
     /// The stream's index within the container.
     pub index: u32,
@@ -114,9 +118,48 @@ pub struct StreamInfo {
     /// duration ticks and time base. `None` when the container does not
     /// advertise a duration for this stream.
     pub duration_secs: Option<f64>,
+    /// Stream-level metadata blobs (ICC / Exif / XMP / IPTC / custom) as
+    /// the demuxer declared them on the stream — read from the header,
+    /// no decode — after the [`OpenOptions`](crate::OpenOptions) strip
+    /// rules. Per-picture blobs need a decode and are not here.
+    pub blobs: Vec<oxideav_core::MetadataBlob>,
 }
 
 impl StreamInfo {
+    /// The first stream-level blob of `kind`, if any.
+    pub fn blob(&self, kind: &oxideav_core::BlobKind) -> Option<&oxideav_core::MetadataBlob> {
+        self.blobs.iter().find(|b| b.is(kind))
+    }
+
+    /// The stream's ICC profile bytes, if declared.
+    pub fn icc(&self) -> Option<&[u8]> {
+        self.blob(&oxideav_core::BlobKind::ICC)
+            .map(|b| b.data.as_slice())
+    }
+
+    /// The stream's Exif block, if declared.
+    pub fn exif(&self) -> Option<&[u8]> {
+        self.blob(&oxideav_core::BlobKind::EXIF)
+            .map(|b| b.data.as_slice())
+    }
+
+    /// The stream's XMP packet, if declared.
+    pub fn xmp(&self) -> Option<&[u8]> {
+        self.blob(&oxideav_core::BlobKind::XMP)
+            .map(|b| b.data.as_slice())
+    }
+
+    /// The stream's IPTC datasets, if declared.
+    pub fn iptc(&self) -> Option<&[u8]> {
+        self.blob(&oxideav_core::BlobKind::IPTC)
+            .map(|b| b.data.as_slice())
+    }
+
+    /// True when the stream declares at least one blob.
+    pub fn has_metadata(&self) -> bool {
+        !self.blobs.is_empty()
+    }
+
     /// Pixel dimensions as one pair, when the container advertises both.
     pub fn dimensions(&self) -> Option<(u32, u32)> {
         Some((self.width?, self.height?))
@@ -149,7 +192,10 @@ impl StreamInfo {
 /// a source's broad kind, its detected container, overall size / duration
 /// / metadata, and a per-stream summary — all obtained without a full
 /// decode (header + container stream-table parse only).
+///
+/// `#[non_exhaustive]`: produced by the facade, read by field.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Probe {
     /// The broad category resolved by the discrimination ladder.
     pub kind: MediaKind,
@@ -174,6 +220,44 @@ pub struct Probe {
 }
 
 impl Probe {
+    /// The first video stream's stream-level blobs (what
+    /// [`open_image_file`](crate::open_image_file) would report as the
+    /// file's), read from the header without a decode; empty when there
+    /// is no video stream or it declares none.
+    pub fn blobs(&self) -> &[oxideav_core::MetadataBlob] {
+        self.first_video().map_or(&[], |s| s.blobs.as_slice())
+    }
+
+    /// The first video stream's blob of `kind`, if any.
+    pub fn blob(&self, kind: &oxideav_core::BlobKind) -> Option<&oxideav_core::MetadataBlob> {
+        self.first_video().and_then(|s| s.blob(kind))
+    }
+
+    /// The first video stream's ICC profile, if declared.
+    pub fn icc(&self) -> Option<&[u8]> {
+        self.first_video().and_then(StreamInfo::icc)
+    }
+
+    /// The first video stream's Exif block, if declared.
+    pub fn exif(&self) -> Option<&[u8]> {
+        self.first_video().and_then(StreamInfo::exif)
+    }
+
+    /// The first video stream's XMP packet, if declared.
+    pub fn xmp(&self) -> Option<&[u8]> {
+        self.first_video().and_then(StreamInfo::xmp)
+    }
+
+    /// The first video stream's IPTC datasets, if declared.
+    pub fn iptc(&self) -> Option<&[u8]> {
+        self.first_video().and_then(StreamInfo::iptc)
+    }
+
+    /// True when any stream declares a blob.
+    pub fn has_metadata(&self) -> bool {
+        self.streams.iter().any(StreamInfo::has_metadata)
+    }
+
     /// Iterate the video-kind streams (still images included).
     pub fn video_streams(&self) -> impl Iterator<Item = &StreamInfo> {
         self.streams.iter().filter(|s| s.is_video())
@@ -398,9 +482,16 @@ mod tests {
                 channels: None,
                 bit_rate: Some(2_000_000),
                 duration_secs: Some(12.5),
+                blobs: vec![oxideav_core::MetadataBlob::new(
+                    oxideav_core::BlobKind::ICC,
+                    vec![1, 2],
+                )],
             }],
         };
         assert_eq!(p.clone(), p);
+        assert_eq!(p.icc(), Some(&[1u8, 2][..]));
+        assert!(p.exif().is_none() && p.has_metadata());
+        assert_eq!(p.blobs().len(), 1);
         assert_eq!(p.streams[0].kind, StreamKind::Video);
         assert_eq!(p.metadata[0].0, "title");
     }
@@ -416,6 +507,7 @@ mod tests {
             channels: None,
             bit_rate: None,
             duration_secs: None,
+            blobs: Vec::new(),
         }
     }
 

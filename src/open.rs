@@ -611,6 +611,15 @@ fn probe_registry(
             channels: s.params.channels,
             bit_rate: s.params.bit_rate,
             duration_secs,
+            // Stream-level blobs are in the header; the strip rules
+            // apply here as they do on a decode.
+            blobs: s
+                .params
+                .blobs
+                .iter()
+                .filter(|b| opts.keeps(b))
+                .cloned()
+                .collect(),
         });
     }
 
@@ -1311,6 +1320,31 @@ mod registry_tests {
             ..OpenOptions::default()
         };
         assert!(open_image_with(&ctx, Source::bytes(&bytes), &ok).is_ok());
+    }
+
+    #[test]
+    fn probe_reports_stream_blobs_from_the_header_under_the_strip_rules() {
+        let ctx = testfmt::context();
+        let bytes = fixture(); // ICC on the stream, Exif on the picture
+        let probe = probe_with(&ctx, Source::bytes(&bytes), &OpenOptions::default()).unwrap();
+        assert_eq!(probe.icc(), Some(&[1u8; 16][..]));
+        assert!(probe.exif().is_none(), "per-picture blobs need a decode");
+        assert!(probe.has_metadata());
+        assert_eq!(probe.streams[0].blobs.len(), 1);
+        let probe = probe_with(
+            &ctx,
+            Source::bytes(&bytes),
+            &OpenOptions::new().without_metadata(),
+        )
+        .unwrap();
+        assert!(!probe.has_metadata() && probe.blobs().is_empty());
+        let probe = probe_with(
+            &ctx,
+            Source::bytes(&bytes),
+            &OpenOptions::new().with_stripped_blobs([BlobKind::ICC]),
+        )
+        .unwrap();
+        assert!(probe.icc().is_none());
     }
 
     #[test]

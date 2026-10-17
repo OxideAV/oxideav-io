@@ -14,7 +14,11 @@
 //!
 //! There are both **unified** and **specialized** entry points, and
 //! every opener takes an [`OpenOptions`] that can restrict which
-//! container / codec is allowed to run.
+//! container / codec is allowed to run, strip embedded metadata and cap
+//! the decode. Metadata blobs (ICC / Exif / XMP / IPTC) and an indexed
+//! picture's palette alpha reach every shape — the native [`Image`],
+//! the flattened [`RgbaImage`], the header-only [`Probe`] — and the
+//! save path writes them back (see [`SaveOptions`]).
 //!
 //! ```no_run
 //! # #[cfg(feature = "full")] {
