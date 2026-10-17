@@ -88,6 +88,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An indexed picture's palette alpha is composited into the RGBA
   flattening (transparent entry → alpha 0) and dropped by the RGB24
   one, as the gateway's views do (pixfmt 0.1.11 / image 0.0.4).
+- Fleet-level suites (`full` feature): `tests/metadata_chain.rs` — ICC /
+  Exif / XMP through every io shape with HEIF as the persisting hop, a
+  png → jpg → heic chain that never corrupts or duplicates a blob and
+  forwards the list, strip / replace rules on open and on save, the
+  zero-config savers; `tests/image_containers.rs` — `ping_format` /
+  `probe` / gateway `ImageFile::container()` agreement over all 25 image
+  crates (HEIF-family brands → `heif` with stream codec `heif`, JPEG XL
+  by both signatures, SVG as `Opened::Vector`), from bytes and from a
+  buffered path, and container-name restrictions.
 - An in-crate test container + codec (`iotest`, tests only) that
   carries stream and per-picture blobs, a palette with its alpha record
   and the forwarded `quality`, so the lean `registry` slice the crate's
