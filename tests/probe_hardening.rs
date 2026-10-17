@@ -219,10 +219,7 @@ fn tiny_png() -> Vec<u8> {
     use oxideav_io::{save_with, Opened, RgbaImage, SaveOptions, Sink};
     let img = RgbaImage::rgba(3, 2, [10u8, 20, 30, 255].repeat(6)).unwrap();
     let mut buf = Vec::new();
-    let opts = SaveOptions {
-        container: Some("png".into()),
-        ..SaveOptions::default()
-    };
+    let opts = SaveOptions::new().with_container("png");
     save_with(ctx(), &Opened::Image(img), Sink::Buffer(&mut buf), &opts).expect("encode seed PNG");
     buf
 }
@@ -232,11 +229,9 @@ fn tiny_jpeg() -> Vec<u8> {
     use oxideav_io::{save_with, Opened, PixelChoice, RgbaImage, SaveOptions, Sink};
     let img = RgbaImage::rgba(3, 2, [10u8, 20, 30, 255].repeat(6)).unwrap();
     let mut buf = Vec::new();
-    let opts = SaveOptions {
-        container: Some("jpeg".into()),
-        pixel: PixelChoice::Rgb,
-        ..SaveOptions::default()
-    };
+    let opts = SaveOptions::new()
+        .with_container("jpeg")
+        .with_pixel(PixelChoice::Rgb);
     save_with(ctx(), &Opened::Image(img), Sink::Buffer(&mut buf), &opts).expect("encode seed JPEG");
     buf
 }

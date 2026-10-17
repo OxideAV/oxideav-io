@@ -39,10 +39,7 @@ mod imp {
     fn png_fixture(c: &RuntimeContext) -> Vec<u8> {
         let img = RgbaImage::rgba(4, 4, [64u8, 128, 192, 255].repeat(16)).unwrap();
         let mut buf = Vec::new();
-        let opts = SaveOptions {
-            container: Some("png".into()),
-            ..SaveOptions::default()
-        };
+        let opts = SaveOptions::new().with_container("png");
         save_with(c, &Opened::Image(img), Sink::Buffer(&mut buf), &opts).expect("seed PNG");
         buf
     }

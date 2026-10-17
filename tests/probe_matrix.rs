@@ -77,10 +77,7 @@ fn media_row(name: &str, bytes: &[u8], want_container: &str) -> Probe {
 fn image_fixture(container: &str) -> Vec<u8> {
     let img = RgbaImage::rgba(4, 4, [64u8, 128, 192, 255].repeat(16)).unwrap();
     let mut buf = Vec::new();
-    let opts = SaveOptions {
-        container: Some(container.into()),
-        ..SaveOptions::default()
-    };
+    let opts = SaveOptions::new().with_container(container);
     save_with(ctx(), &Opened::Image(img), Sink::Buffer(&mut buf), &opts)
         .unwrap_or_else(|e| panic!("save {container} fixture: {e}"));
     buf

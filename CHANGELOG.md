@@ -42,6 +42,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SaveOptions` adopts the gateway's knobs**: `blobs`
+  (`with_blob` / `with_blobs` — written on top of the picture's own,
+  replacing the source blob of the same kind), `strip_metadata`
+  (`without_metadata()`) and `strip_blobs` (`with_stripped_blobs`)
+  withholding the picture's blobs from the encoder, `options`
+  (`with_option`) forwarded verbatim; builders for the existing fields
+  (`new`, `with_container`, `with_codec`, `with_pixel`, `with_quality`);
+  `to_image_options()` maps them one for one.
+- A kind named in `SaveOptions::blobs` is removed from the picture at
+  both levels before the encode, so the replacement holds whichever
+  level the encoder reads (the gateway replaces at the stream level
+  only; a per-picture blob of the same kind would win on reopen).
+- `save_rgba_with(ctx, &RgbaImage, sink, &SaveOptions)` — the
+  flattened-buffer save `save_with` runs for `Opened::Image`, with the
+  buffer's `blobs` written — and the zero-config `save_image(&Image,
+  path)` / `save_rgba(&RgbaImage, path)`.
 - **`OpenOptions` adopts the gateway's knobs**: `strip_metadata` /
   `strip_blobs` (`without_metadata()`, `with_stripped_blobs(kinds)`)
   apply to the native `Image` / `ImageFile` through the gateway and to
@@ -94,6 +110,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (breaking)
 
+- `SaveOptions` is `#[non_exhaustive]`: build it with `SaveOptions::new()`
+  and the `with_*` builders instead of a struct literal.
 - `OpenOptions` is `#[non_exhaustive]`: build it with `OpenOptions::new()`
   / `eager()` and the `with_*` builders instead of a struct literal.
 - `RgbaImage` is `#[non_exhaustive]`: build it with the constructors

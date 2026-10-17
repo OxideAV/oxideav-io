@@ -96,7 +96,7 @@ pub use open::{
 #[cfg(feature = "registry")]
 pub use probe::{MediaKind, PingFormat, Probe, StreamInfo, StreamKind, PING_FORMAT_MAX_READ_BYTES};
 #[cfg(feature = "registry")]
-pub use save::{save_image_with, save_with, PixelChoice, SaveOptions};
+pub use save::{save_image_with, save_rgba_with, save_with, PixelChoice, SaveOptions};
 
 /// The gateway's native picture types, re-exported so callers of
 /// [`open_image`] / [`open_image_with`] need no direct `oxideav-image`
@@ -258,6 +258,32 @@ pub fn save(opened: &Opened, path: impl AsRef<std::path::Path>) -> Result<()> {
     save_with(
         default_context(),
         opened,
+        Sink::Path(path.as_ref()),
+        &SaveOptions::default(),
+    )
+}
+
+/// Save a native gateway picture to a file by path, choosing the
+/// container + codec from the path's extension; its blobs are written
+/// (see [`save_image_with`] and [`SaveOptions`] for the knobs).
+#[cfg(feature = "full")]
+pub fn save_image(image: &Image, path: impl AsRef<std::path::Path>) -> Result<()> {
+    save_image_with(
+        default_context(),
+        image,
+        Sink::Path(path.as_ref()),
+        &SaveOptions::default(),
+    )
+}
+
+/// Save a flattened [`RgbaImage`] to a file by path, choosing the
+/// container + codec from the path's extension; its `blobs` are
+/// written (see [`save_rgba_with`]).
+#[cfg(feature = "full")]
+pub fn save_rgba(image: &RgbaImage, path: impl AsRef<std::path::Path>) -> Result<()> {
+    save_rgba_with(
+        default_context(),
+        image,
         Sink::Path(path.as_ref()),
         &SaveOptions::default(),
     )

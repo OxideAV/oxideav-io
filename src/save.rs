@@ -8,12 +8,13 @@
 //! format name or extension, picks the container's default codec (or
 //! [`SaveOptions::codec`]), walks its pixel-format ladder when an
 //! encoder **or** muxer refuses a layout, forwards `quality` only to
-//! encoders whose option schema declares it, and assembles the whole
-//! file in memory — so a seekable muxer (PNG / JPEG rewrite their
+//! encoders whose option schema declares it, hands the picture's blobs
+//! (and [`SaveOptions::blobs`]) to the encoder at both levels, and
+//! assembles the whole file in memory — so a seekable muxer (PNG / JPEG rewrite their
 //! headers) works even when the destination is a non-seekable
 //! [`Sink::Writer`]. The finished bytes are committed to the sink here.
 
-use oxideav_core::{PixelFormat, RuntimeContext};
+use oxideav_core::{BlobKind, MetadataBlob, PixelFormat, RuntimeContext};
 
 use crate::error::{Error, Result};
 use crate::image::RgbaImage;
@@ -52,7 +53,11 @@ impl PixelChoice {
 /// Per-call knobs for the save facade. Both `container` and `codec` may
 /// be left `None`, in which case the facade derives them from the sink's
 /// file extension.
+///
+/// `#[non_exhaustive]`: build with [`SaveOptions::new`] and the
+/// `with_*` builders; the fields stay readable.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct SaveOptions {
     /// Force a specific container / format name (e.g. `"png"`,
     /// `"jpeg"`, or a file extension such as `"jpg"` / `"heic"`).
@@ -68,10 +73,96 @@ pub struct SaveOptions {
     /// has one** (encoders parse options strictly). Codecs without the
     /// knob use their own default.
     pub quality: Option<u8>,
+    /// Blobs written on top of the picture's own: a blob here replaces
+    /// every source blob of the same kind (set an ICC profile, swap the
+    /// XMP packet); other kinds pass through untouched. Written even
+    /// when `strip_metadata` withholds the source's.
+    pub blobs: Vec<MetadataBlob>,
+    /// Hand none of the picture's blobs to the encoder (`blobs` above
+    /// are still written). Default `false`.
+    pub strip_metadata: bool,
+    /// Source blob kinds withheld from the encoder when
+    /// `strip_metadata` is off.
+    pub strip_blobs: Vec<BlobKind>,
+    /// Extra encoder options as `(name, value)` pairs, forwarded
+    /// verbatim; an encoder rejects names its declared schema lacks.
+    pub options: Vec<(String, String)>,
 }
 
 impl SaveOptions {
-    /// The gateway options this facade's knobs map onto.
+    /// Defaults everywhere: container and codec from the sink, the
+    /// gateway's pixel ladder, the encoder's own quality, the picture's
+    /// blobs written as they are.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Force the container / format name or extension (see the field).
+    pub fn with_container(mut self, name: impl Into<String>) -> Self {
+        self.container = Some(name.into());
+        self
+    }
+
+    /// Force the codec id (see the field).
+    pub fn with_codec(mut self, codec: impl Into<String>) -> Self {
+        self.codec = Some(codec.into());
+        self
+    }
+
+    /// Choose the packed layout (see the field).
+    pub fn with_pixel(mut self, pixel: PixelChoice) -> Self {
+        self.pixel = pixel;
+        self
+    }
+
+    /// Advisory quality `0..=100` (see the field).
+    pub fn with_quality(mut self, q: u8) -> Self {
+        self.quality = Some(q.min(100));
+        self
+    }
+
+    /// Write this blob, replacing the source's of its kind (see the
+    /// field).
+    pub fn with_blob(mut self, blob: MetadataBlob) -> Self {
+        self.blobs.push(blob);
+        self
+    }
+
+    /// Replace the written blobs (see the field).
+    pub fn with_blobs(mut self, blobs: Vec<MetadataBlob>) -> Self {
+        self.blobs = blobs;
+        self
+    }
+
+    /// Keep (`true`, the default) or withhold every source blob.
+    pub fn with_metadata(mut self, keep: bool) -> Self {
+        self.strip_metadata = !keep;
+        self
+    }
+
+    /// Withhold every source blob from the encoder.
+    pub fn without_metadata(self) -> Self {
+        self.with_metadata(false)
+    }
+
+    /// Withhold these source blob kinds from the encoder.
+    pub fn with_stripped_blobs<I, K>(mut self, kinds: I) -> Self
+    where
+        I: IntoIterator<Item = K>,
+        K: Into<BlobKind>,
+    {
+        self.strip_blobs = kinds.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Add one encoder option (see the field).
+    pub fn with_option(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.push((name.into(), value.into()));
+        self
+    }
+
+    /// The gateway options this facade's knobs map onto, one for one
+    /// (`container` is resolved by the facade and is not among them).
     pub fn to_image_options(&self) -> oxideav_image::SaveOptions {
         let mut g = oxideav_image::SaveOptions::new();
         if let Some(q) = self.quality {
@@ -82,6 +173,16 @@ impl SaveOptions {
         }
         if let Some(c) = &self.codec {
             g = g.with_codec(c.clone());
+        }
+        if !self.blobs.is_empty() {
+            g = g.with_blobs(self.blobs.clone());
+        }
+        g = g.with_metadata(!self.strip_metadata);
+        if !self.strip_blobs.is_empty() {
+            g = g.with_stripped_blobs(self.strip_blobs.iter().cloned());
+        }
+        for (k, v) in &self.options {
+            g = g.with_option(k.clone(), v.clone());
         }
         g
     }
@@ -123,6 +224,12 @@ pub fn save_with(
 /// Encode a native gateway picture to a sink. The format is
 /// [`SaveOptions::container`] or the sink's extension; everything else
 /// is the gateway's resolution (see the module docs).
+///
+/// A kind named in [`SaveOptions::blobs`] is removed from the picture
+/// at both levels (frame and stream) before the encode, so the
+/// replacement holds whichever level the encoder reads — the gateway
+/// replaces at the stream level only, and a per-picture blob of the
+/// same kind would otherwise win on reopen.
 pub fn save_image_with(
     ctx: &RuntimeContext,
     image: &oxideav_image::Image,
@@ -130,6 +237,16 @@ pub fn save_image_with(
     opts: &SaveOptions,
 ) -> Result<()> {
     let format = resolve_format(&sink, opts)?;
+    let replaced: Vec<&BlobKind> = opts.blobs.iter().map(|b| &b.kind).collect();
+    let stripped;
+    let image = if replaced.is_empty() || !image.has_metadata() {
+        image
+    } else {
+        let mut i = image.clone();
+        i.retain_blobs(|b| !replaced.contains(&&b.kind));
+        stripped = i;
+        &stripped
+    };
     let bytes =
         oxideav_image::encode(ctx, image, &format, &opts.to_image_options()).map_err(save_error)?;
     if bytes.is_empty() {
@@ -162,13 +279,27 @@ fn save_error(e: oxideav_image::ImageError) -> Error {
     }
 }
 
-/// Encode + mux a still image to the sink.
-fn save_image(ctx: &RuntimeContext, img: &RgbaImage, sink: Sink, opts: &SaveOptions) -> Result<()> {
+/// Encode a flattened [`RgbaImage`] to a sink: the buffer is wrapped
+/// as a native picture with its `blobs` attached ([`RgbaImage::to_image`])
+/// and handed to [`save_image_with`], so its metadata is written unless
+/// `opts` strips or replaces it. What `save_with` does for
+/// `Opened::Image`.
+pub fn save_rgba_with(
+    ctx: &RuntimeContext,
+    img: &RgbaImage,
+    sink: Sink,
+    opts: &SaveOptions,
+) -> Result<()> {
     if img.width == 0 || img.height == 0 {
         return Err(Error::invalid("save: cannot encode a zero-sized image"));
     }
     let image = img.to_image()?;
     save_image_with(ctx, &image, sink, opts)
+}
+
+/// Encode + mux a still image to the sink.
+fn save_image(ctx: &RuntimeContext, img: &RgbaImage, sink: Sink, opts: &SaveOptions) -> Result<()> {
+    save_rgba_with(ctx, img, sink, opts)
 }
 
 /// Encode + mux a 3D mesh scene to the sink via the mesh registry. The
@@ -201,17 +332,27 @@ mod unit_tests {
         assert_eq!(PixelChoice::Auto.pixel_format(), None);
         assert_eq!(PixelChoice::Rgb.pixel_format(), Some(PixelFormat::Rgb24));
         assert_eq!(PixelChoice::Rgba.pixel_format(), Some(PixelFormat::Rgba));
-        let o = SaveOptions {
-            container: Some("jpeg".into()),
-            codec: Some("mjpeg".into()),
-            pixel: PixelChoice::Rgb,
-            quality: Some(250),
-        }
-        .to_image_options();
-        assert_eq!(o.codec.as_deref(), Some("mjpeg"));
-        assert_eq!(o.pixel_format, Some(PixelFormat::Rgb24));
-        // The gateway clamps quality to 100.
-        assert_eq!(o.quality, Some(100));
+        let icc = MetadataBlob::new(BlobKind::ICC, vec![1, 2, 3]);
+        let o = SaveOptions::new()
+            .with_container("jpeg")
+            .with_codec("mjpeg")
+            .with_pixel(PixelChoice::Rgb)
+            .with_quality(250)
+            .with_blob(icc.clone())
+            .with_stripped_blobs([BlobKind::EXIF])
+            .with_option("k", "v");
+        assert_eq!(o.container.as_deref(), Some("jpeg"));
+        let g = o.to_image_options();
+        assert_eq!(g.codec.as_deref(), Some("mjpeg"));
+        assert_eq!(g.pixel_format, Some(PixelFormat::Rgb24));
+        // Quality is clamped to 100 on the way in.
+        assert_eq!(g.quality, Some(100));
+        assert_eq!(g.blobs, vec![icc]);
+        assert!(!g.strip_metadata);
+        assert_eq!(g.strip_blobs, vec![BlobKind::EXIF]);
+        assert_eq!(g.options, vec![("k".to_string(), "v".to_string())]);
+        let g = SaveOptions::new().without_metadata().to_image_options();
+        assert!(g.strip_metadata && g.blobs.is_empty() && g.options.is_empty());
     }
 
     #[test]
@@ -537,6 +678,66 @@ mod registry_tests {
             panic!("expected Image")
         };
         assert_eq!(back, img);
+    }
+
+    #[test]
+    fn save_options_replace_strip_and_forward_encoder_options() {
+        use oxideav_core::{BlobKind, MetadataBlob};
+        let ctx = testfmt::context();
+        let img = sample()
+            .with_blob(MetadataBlob::new(BlobKind::ICC, vec![3u8; 8]))
+            .with_blob(MetadataBlob::new(BlobKind::EXIF, vec![4u8; 4]))
+            .with_blob(MetadataBlob::new(BlobKind::XMP, b"<x/>".to_vec()));
+        let reopen = |buf: &[u8]| {
+            crate::open::open_image_with(&ctx, Source::bytes(buf), &OpenOptions::default()).unwrap()
+        };
+        // A blob in the options replaces the source's of its kind;
+        // the other kinds pass through.
+        let mut buf = Vec::new();
+        let opts = SaveOptions::new()
+            .with_container(testfmt::NAME)
+            .with_blob(MetadataBlob::new(BlobKind::ICC, vec![9u8; 2]));
+        save_rgba_with(&ctx, &img, Sink::Buffer(&mut buf), &opts).unwrap();
+        let back = reopen(&buf);
+        assert_eq!(back.icc(), Some(&[9u8; 2][..]));
+        assert_eq!(back.exif(), Some(&[4u8; 4][..]));
+        assert_eq!(back.xmp(), Some(&b"<x/>"[..]));
+        // strip_metadata withholds the source's, still writes the
+        // options' own.
+        let mut buf = Vec::new();
+        let opts = SaveOptions::new()
+            .with_container(testfmt::NAME)
+            .without_metadata()
+            .with_blob(MetadataBlob::new(BlobKind::IPTC, vec![5u8]));
+        save_rgba_with(&ctx, &img, Sink::Buffer(&mut buf), &opts).unwrap();
+        let back = reopen(&buf);
+        assert!(back.icc().is_none() && back.exif().is_none() && back.xmp().is_none());
+        assert_eq!(back.iptc(), Some(&[5u8][..]));
+        // Kinds can be withheld one by one.
+        let mut buf = Vec::new();
+        let opts = SaveOptions::new()
+            .with_container(testfmt::NAME)
+            .with_stripped_blobs([BlobKind::EXIF]);
+        save_rgba_with(&ctx, &img, Sink::Buffer(&mut buf), &opts).unwrap();
+        let back = reopen(&buf);
+        assert!(back.exif().is_none());
+        assert!(back.icc().is_some() && back.xmp().is_some());
+        // A declared encoder option is forwarded verbatim; an unknown
+        // one is the encoder's refusal, not a silent drop.
+        let mut buf = Vec::new();
+        let opts = SaveOptions::new()
+            .with_container(testfmt::NAME)
+            .with_option("quality", "33");
+        save_rgba_with(&ctx, &img, Sink::Buffer(&mut buf), &opts).unwrap();
+        let file =
+            open_image_file_with(&ctx, Source::bytes(&buf), &OpenOptions::default()).unwrap();
+        assert_eq!(file.metadata()[0].1, "33");
+        let mut buf = Vec::new();
+        let opts = SaveOptions::new()
+            .with_container(testfmt::NAME)
+            .with_option("no-such-option", "1");
+        assert!(save_rgba_with(&ctx, &img, Sink::Buffer(&mut buf), &opts).is_err());
+        assert!(buf.is_empty());
     }
 
     #[test]
