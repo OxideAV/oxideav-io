@@ -42,6 +42,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`RgbaImage` carries metadata.** A `blobs: Vec<MetadataBlob>` field
+  with `blob(&kind)` / `blobs_of` / `icc()` / `exif()` / `xmp()` /
+  `iptc()` / `has_metadata()` / `with_blob(s)` / `push_blob` /
+  `retain_blobs` / `strip_metadata` / `without_metadata`.
+  `RgbaImage::from_image` (hence `Opened::Image`, `open_rgba*` /
+  `open_rgb*`) lifts the native picture's resolved blobs (frame first,
+  then stream kinds the frame lacks); `to_image` / `into_image` attach
+  them as the picture's own, so the flattened save path writes them
+  (ruling: the blobs live on the buffer, not on `Opened`). The
+  transcode transforms (`Convert`, `Resize`) keep them.
+- `RgbaImage::new(width, height, pixels, stride)` / `rgba(..)` /
+  `rgb(..)` constructors (geometry-checked, `Error::Invalid` on a
+  mismatch or a zero side); the struct is `#[non_exhaustive]`.
+- An indexed picture's palette alpha is composited into the RGBA
+  flattening (transparent entry → alpha 0) and dropped by the RGB24
+  one, as the gateway's views do (pixfmt 0.1.11 / image 0.0.4).
 - An in-crate test container + codec (`iotest`, tests only) that
   carries stream and per-picture blobs, a palette with its alpha record
   and the forwarded `quality`, so the lean `registry` slice the crate's
@@ -61,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for Image` (both by value and by reference).
 - `PixelChoice::pixel_format()`, `SaveOptions::to_image_options()`.
 - `Image` and `ImageFile` re-exported at the crate root.
+
+### Changed (breaking)
+
+- `RgbaImage` is `#[non_exhaustive]`: build it with the constructors
+  (`RgbaImage::rgba(w, h, pixels)?`) instead of a struct literal.
 
 ### Deprecated
 

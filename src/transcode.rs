@@ -120,7 +120,9 @@ fn resize_image(img: &RgbaImage, width: u32, height: u32) -> Result<RgbaImage> {
     cp.height = Some(height);
     cp.pixel_format = Some(src_format);
     let resized = oxideav_image::Image::from_video_frame(out, &cp)?;
-    RgbaImage::from_image_in(&resized, src_format)
+    // The kernel works on pixels; the picture's metadata is carried
+    // across explicitly.
+    Ok(RgbaImage::from_image_in(&resized, src_format)?.with_blobs(img.blobs.clone()))
 }
 
 #[cfg(not(feature = "transforms"))]
@@ -136,15 +138,17 @@ mod unit_tests {
 
     #[test]
     fn convert_rgba_to_rgb_and_back() {
-        let rgba = RgbaImage {
-            width: 2,
-            height: 1,
-            pixels: vec![1, 2, 3, 255, 4, 5, 6, 0],
-            stride: 8,
-        };
+        let rgba = RgbaImage::rgba(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 0])
+            .unwrap()
+            .with_blob(oxideav_core::MetadataBlob::new(
+                oxideav_core::BlobKind::XMP,
+                b"<x/>".to_vec(),
+            ));
         let rgb = convert_image(&rgba, PixelChoice::Rgb).unwrap();
         assert!(rgb.is_rgb());
         assert_eq!(rgb.pixels, vec![1, 2, 3, 4, 5, 6]);
+        // The layout conversion keeps the metadata.
+        assert_eq!(rgb.blobs, rgba.blobs);
         // Auto keeps the layout it is given.
         assert_eq!(convert_image(&rgb, PixelChoice::Auto).unwrap(), rgb);
         let back = convert_image(&rgb, PixelChoice::Rgba).unwrap();
@@ -164,12 +168,7 @@ mod tests {
 
     /// 4×4 RGBA test image: solid red, opaque.
     fn red_png_bytes(c: &RuntimeContext) -> Vec<u8> {
-        let img = RgbaImage {
-            width: 4,
-            height: 4,
-            pixels: [255, 0, 0, 255].repeat(16),
-            stride: 16,
-        };
+        let img = RgbaImage::rgba(4, 4, [255, 0, 0, 255].repeat(16)).unwrap();
         let mut buf = Vec::new();
         let opts = SaveOptions {
             container: Some("png".into()),

@@ -217,12 +217,7 @@ fn mesh_extension_on_garbage_is_mesh_but_open_fails_cleanly() {
 /// Build a tiny valid PNG through the facade's own save path.
 fn tiny_png() -> Vec<u8> {
     use oxideav_io::{save_with, Opened, RgbaImage, SaveOptions, Sink};
-    let img = RgbaImage {
-        width: 3,
-        height: 2,
-        pixels: [10u8, 20, 30, 255].repeat(6),
-        stride: 12,
-    };
+    let img = RgbaImage::rgba(3, 2, [10u8, 20, 30, 255].repeat(6)).unwrap();
     let mut buf = Vec::new();
     let opts = SaveOptions {
         container: Some("png".into()),
@@ -235,12 +230,7 @@ fn tiny_png() -> Vec<u8> {
 /// Build a tiny valid JPEG through the facade's own save path.
 fn tiny_jpeg() -> Vec<u8> {
     use oxideav_io::{save_with, Opened, PixelChoice, RgbaImage, SaveOptions, Sink};
-    let img = RgbaImage {
-        width: 3,
-        height: 2,
-        pixels: [10u8, 20, 30, 255].repeat(6),
-        stride: 12,
-    };
+    let img = RgbaImage::rgba(3, 2, [10u8, 20, 30, 255].repeat(6)).unwrap();
     let mut buf = Vec::new();
     let opts = SaveOptions {
         container: Some("jpeg".into()),

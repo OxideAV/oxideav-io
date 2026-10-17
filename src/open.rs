@@ -1067,6 +1067,25 @@ mod registry_tests {
     }
 
     #[test]
+    fn unified_open_lifts_the_blobs_onto_the_flattened_picture() {
+        let ctx = testfmt::context();
+        let bytes = fixture();
+        let Opened::Image(img) =
+            open_with(&ctx, Source::bytes(&bytes), &OpenOptions::eager()).unwrap()
+        else {
+            panic!("expected Image")
+        };
+        assert_eq!(img.icc(), Some(&[1u8; 16][..]));
+        assert_eq!(img.exif(), Some(&[2u8; 8][..]));
+        assert_eq!(img.blobs.len(), 2);
+        // The deprecated flatteners carry them too.
+        #[allow(deprecated)]
+        let rgb = open_rgb_with(&ctx, Source::bytes(&bytes), &OpenOptions::default()).unwrap();
+        assert!(rgb.is_rgb());
+        assert_eq!(rgb.blobs, img.blobs);
+    }
+
+    #[test]
     fn allow_and_deny_lists_are_restricted_on_every_entry_point() {
         let ctx = testfmt::context();
         let bytes = fixture();

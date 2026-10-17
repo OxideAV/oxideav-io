@@ -37,12 +37,7 @@ mod imp {
     }
 
     fn png_fixture(c: &RuntimeContext) -> Vec<u8> {
-        let img = RgbaImage {
-            width: 4,
-            height: 4,
-            pixels: [64u8, 128, 192, 255].repeat(16),
-            stride: 16,
-        };
+        let img = RgbaImage::rgba(4, 4, [64u8, 128, 192, 255].repeat(16)).unwrap();
         let mut buf = Vec::new();
         let opts = SaveOptions {
             container: Some("png".into()),

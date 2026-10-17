@@ -75,12 +75,7 @@ fn media_row(name: &str, bytes: &[u8], want_container: &str) -> Probe {
 /// A 4×4 image saved through the facade in the given container, with
 /// the default (Auto) pixel choice.
 fn image_fixture(container: &str) -> Vec<u8> {
-    let img = RgbaImage {
-        width: 4,
-        height: 4,
-        pixels: [64u8, 128, 192, 255].repeat(16),
-        stride: 16,
-    };
+    let img = RgbaImage::rgba(4, 4, [64u8, 128, 192, 255].repeat(16)).unwrap();
     let mut buf = Vec::new();
     let opts = SaveOptions {
         container: Some(container.into()),

@@ -238,18 +238,16 @@ mod tests {
     }
 
     fn sample_image() -> RgbaImage {
-        RgbaImage {
-            width: 2,
-            height: 2,
-            // Tight RGBA, 4 distinct pixels.
-            pixels: vec![
-                255, 0, 0, 255, // red
-                0, 255, 0, 255, // green
-                0, 0, 255, 255, // blue
-                255, 255, 255, 128, // semi-transparent white
+        // Tight RGBA, 4 distinct pixels: red, green, blue,
+        // semi-transparent white.
+        RgbaImage::rgba(
+            2,
+            2,
+            vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 128,
             ],
-            stride: 8,
-        }
+        )
+        .unwrap()
     }
 
     #[test]
@@ -399,6 +397,7 @@ mod tests {
             height: 0,
             pixels: Vec::new(),
             stride: 0,
+            blobs: Vec::new(),
         });
         let mut buf = Vec::new();
         let opts = SaveOptions {
@@ -474,12 +473,7 @@ mod registry_tests {
     use crate::testfmt;
 
     fn sample() -> RgbaImage {
-        RgbaImage {
-            width: 2,
-            height: 1,
-            pixels: vec![1, 2, 3, 255, 4, 5, 6, 0],
-            stride: 8,
-        }
+        RgbaImage::rgba(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 0]).unwrap()
     }
 
     #[test]
@@ -509,6 +503,40 @@ mod registry_tests {
             Opened::Image(img) => assert_eq!(img, sample()),
             other => panic!("expected Image, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn flattened_save_writes_the_pictures_blobs() {
+        use oxideav_core::{BlobKind, MetadataBlob};
+        let ctx = testfmt::context();
+        let img = sample()
+            .with_blob(MetadataBlob::new(BlobKind::ICC, vec![3u8; 8]))
+            .with_blob(MetadataBlob::new(BlobKind::XMP, b"<x/>".to_vec()));
+        let mut buf = Vec::new();
+        let opts = SaveOptions {
+            container: Some(testfmt::NAME.into()),
+            ..SaveOptions::default()
+        };
+        save_with(
+            &ctx,
+            &Opened::Image(img.clone()),
+            Sink::Buffer(&mut buf),
+            &opts,
+        )
+        .unwrap();
+        let native =
+            crate::open::open_image_with(&ctx, Source::bytes(&buf), &OpenOptions::default())
+                .unwrap();
+        // A single-picture encode promotes the picture's blobs to the
+        // stream (the gateway's ruling), and they come back resolved.
+        assert_eq!(native.icc(), Some(&[3u8; 8][..]));
+        assert_eq!(native.xmp(), Some(&b"<x/>"[..]));
+        let Opened::Image(back) =
+            open_with(&ctx, Source::bytes(&buf), &OpenOptions::eager()).unwrap()
+        else {
+            panic!("expected Image")
+        };
+        assert_eq!(back, img);
     }
 
     #[test]
