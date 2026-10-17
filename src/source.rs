@@ -9,7 +9,7 @@
 
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufReader, Read, Seek, Write};
 use std::path::Path;
 
 use oxideav_core::{ReadSeek, RuntimeContext, SourceOutput};
@@ -18,7 +18,8 @@ use crate::error::{Error, Result};
 
 /// Something the facade can open for reading.
 pub enum Source<'a> {
-    /// A local filesystem path, opened directly with [`std::fs::File`].
+    /// A local filesystem path, opened with [`std::fs::File`] behind a
+    /// [`BufReader`] (every probe and demuxer read is buffered).
     Path(&'a Path),
     /// A URI resolved through the context's
     /// [`SourceRegistry`](oxideav_core::SourceRegistry)
@@ -28,7 +29,9 @@ pub enum Source<'a> {
     Uri(&'a str),
     /// An in-memory byte buffer.
     Bytes(Cow<'a, [u8]>),
-    /// A caller-supplied seekable reader (already open).
+    /// A caller-supplied seekable reader (already open), used as is —
+    /// wrap an unbuffered one with [`Source::reader`] or a
+    /// [`BufReader`] yourself.
     Reader(Box<dyn ReadSeek>),
 }
 
@@ -36,6 +39,20 @@ impl<'a> Source<'a> {
     /// Convenience: borrow a byte slice as a source.
     pub fn bytes(b: &'a [u8]) -> Self {
         Source::Bytes(Cow::Borrowed(b))
+    }
+
+    /// Convenience: any `Read + Seek + Send` value as a source, boxed
+    /// (unbuffered, exactly as handed in — see
+    /// [`Source::buffered`]).
+    pub fn reader<R: Read + Seek + Send + 'static>(r: R) -> Self {
+        Source::Reader(Box::new(r))
+    }
+
+    /// Convenience: any `Read + Seek + Send` value behind a
+    /// [`BufReader`] — the right shape for an unbuffered file or
+    /// socket-backed seekable stream.
+    pub fn buffered<R: Read + Seek + Send + 'static>(r: R) -> Self {
+        Source::Reader(Box::new(BufReader::new(r)))
     }
 
     /// The lowercase extension hint (no leading dot) implied by this
@@ -59,7 +76,7 @@ impl<'a> Source<'a> {
             Source::Path(p) => {
                 let f = File::open(p)
                     .map_err(|e| Error::Io(std::io::Error::new(e.kind(), format!("{p:?}: {e}"))))?;
-                Ok(Box::new(f))
+                Ok(Box::new(BufReader::new(f)))
             }
             Source::Bytes(b) => Ok(Box::new(std::io::Cursor::new(b.into_owned()))),
             Source::Reader(r) => Ok(r),
@@ -89,6 +106,11 @@ pub enum Sink<'a> {
 }
 
 impl<'a> Sink<'a> {
+    /// Convenience: any `Write + Send` value as a sink, boxed.
+    pub fn writer<W: Write + Send + 'static>(w: W) -> Self {
+        Sink::Writer(Box::new(w))
+    }
+
     /// The lowercase extension hint (no leading dot) implied by this
     /// sink's address, if any. Drives the default container / codec
     /// choice when [`SaveOptions`](crate::SaveOptions) leaves them unset.

@@ -42,6 +42,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`OpenOptions` adopts the gateway's knobs**: `strip_metadata` /
+  `strip_blobs` (`without_metadata()`, `with_stripped_blobs(kinds)`)
+  apply to the native `Image` / `ImageFile` through the gateway and to
+  the flattened `Opened::Image` on the unified path; `max_pixels`
+  (`with_max_pixels`) refuses an oversized stream from its geometry
+  before any decoder exists, on both paths (`Error::Invalid`);
+  `decoder_options` (`with_decoder_option`). Builders for every field
+  (`new`, `eager`, `with_eager_image`, `with_ext_hint`,
+  `with_allow_containers` / `with_deny_containers` /
+  `with_allow_codecs` / `with_deny_codecs`, `with_metadata`), and
+  `to_image_options()` maps them one for one.
+- `Source::Path` opens the file behind a `BufReader`; `Source::reader(r)`
+  boxes any `Read + Seek + Send`, `Source::buffered(r)` wraps it in a
+  `BufReader` first; `Sink::writer(w)` boxes any `Write + Send`.
 - **`RgbaImage` carries metadata.** A `blobs: Vec<MetadataBlob>` field
   with `blob(&kind)` / `blobs_of` / `icc()` / `exif()` / `xmp()` /
   `iptc()` / `has_metadata()` / `with_blob(s)` / `push_blob` /
@@ -80,6 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (breaking)
 
+- `OpenOptions` is `#[non_exhaustive]`: build it with `OpenOptions::new()`
+  / `eager()` and the `with_*` builders instead of a struct literal.
 - `RgbaImage` is `#[non_exhaustive]`: build it with the constructors
   (`RgbaImage::rgba(w, h, pixels)?`) instead of a struct literal.
 

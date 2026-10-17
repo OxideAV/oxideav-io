@@ -540,6 +540,38 @@ mod registry_tests {
     }
 
     #[test]
+    fn writer_sink_receives_the_whole_file() {
+        let ctx = testfmt::context();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        struct W(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for W {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let opts = SaveOptions {
+            container: Some(testfmt::NAME.into()),
+            ..SaveOptions::default()
+        };
+        save_with(
+            &ctx,
+            &Opened::Image(sample()),
+            Sink::writer(W(shared.clone())),
+            &opts,
+        )
+        .unwrap();
+        let written = shared.lock().unwrap().clone();
+        let img =
+            crate::open::open_image_with(&ctx, Source::bytes(&written), &OpenOptions::default())
+                .unwrap();
+        assert_eq!(img.to_rgba8().unwrap(), sample().pixels);
+    }
+
+    #[test]
     fn forced_rgb_drops_alpha_and_unknown_format_is_unsupported() {
         let ctx = testfmt::context();
         let mut buf = Vec::new();

@@ -3,7 +3,9 @@
 
 use std::collections::VecDeque;
 
-use oxideav_core::{Decoder, Demuxer, Frame, PixelFormat, ReadSeek, RuntimeContext, StreamInfo};
+use oxideav_core::{
+    BlobKind, Decoder, Demuxer, Frame, PixelFormat, ReadSeek, RuntimeContext, StreamInfo,
+};
 use oxideav_image::{Image, ImageFile};
 
 use crate::error::{Error, Result};
@@ -14,13 +16,19 @@ use crate::probe::{
 use crate::source::Source;
 
 /// Per-call knobs shared by every opener. Restricts which container /
-/// codec the facade is allowed to use and controls the still-image
-/// collapse behaviour.
+/// codec the facade is allowed to use, controls the still-image
+/// collapse behaviour, and carries the gateway's metadata strip rules
+/// and decode budget for the still-image paths.
+///
+/// `#[non_exhaustive]`: build with [`OpenOptions::new`] /
+/// [`OpenOptions::eager`] and the `with_*` builders; the fields stay
+/// readable.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct OpenOptions {
     /// If `Some`, only these container names may be used; anything else
     /// is rejected with [`Error::Restricted`]. `None` ⇒ any registered
-    /// container.
+    /// container. Names compare case-insensitively.
     pub allow_containers: Option<Vec<String>>,
     /// Container names that are always rejected (takes precedence over
     /// `allow_containers`).
@@ -37,9 +45,34 @@ pub struct OpenOptions {
     /// [`Opened::Image`] instead of being returned as lazy
     /// [`Opened::Media`]. The convenience `open()` sets this.
     pub eager_image: bool,
+    /// Drop every metadata blob (ICC, Exif, XMP, IPTC, custom) as the
+    /// picture is opened — stream level and per picture on the native
+    /// `Image`, the `blobs` of a flattened [`RgbaImage`] — so nothing
+    /// embedded reaches the caller or a later save. The container's
+    /// string metadata is unaffected. Default `false`.
+    pub strip_metadata: bool,
+    /// Blob kinds dropped when `strip_metadata` is off
+    /// (`BlobKind::EXIF` to shed location data, say).
+    pub strip_blobs: Vec<BlobKind>,
+    /// Budget of decoded pixels for the still-image paths (every kept
+    /// picture's `width × height` summed), checked from the stream
+    /// geometry before a decoder is created; an oversized file fails
+    /// with [`Error::Invalid`] before its pixels are decoded. The
+    /// unified [`open_with`] applies it to each video stream's
+    /// geometry. `None` = unlimited.
+    pub max_pixels: Option<u64>,
+    /// Options handed to the still-image decoder through its
+    /// `CodecParameters::options` (names from the codec's declared
+    /// decoder schema; unknown names fail inside the decoder).
+    pub decoder_options: Vec<(String, String)>,
 }
 
 impl OpenOptions {
+    /// Defaults: any container / codec, lazy media, everything kept.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Options with `eager_image` enabled — used by the zero-config
     /// `open()` so still images come back as [`Opened::Image`].
     pub fn eager() -> Self {
@@ -49,12 +82,117 @@ impl OpenOptions {
         }
     }
 
+    /// Collapse a single-frame video stream to [`Opened::Image`]
+    /// (`true`) or keep it lazy (`false`).
+    pub fn with_eager_image(mut self, eager: bool) -> Self {
+        self.eager_image = eager;
+        self
+    }
+
+    /// Override the extension hint (no leading dot).
+    pub fn with_ext_hint(mut self, ext: impl Into<String>) -> Self {
+        self.ext_hint = Some(ext.into());
+        self
+    }
+
+    /// Only these containers may open (see the field).
+    pub fn with_allow_containers<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allow_containers = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Refuse these containers (see the field).
+    pub fn with_deny_containers<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.deny_containers = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Only these codecs may run (see the field).
+    pub fn with_allow_codecs<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allow_codecs = Some(ids.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Refuse these codecs (see the field).
+    pub fn with_deny_codecs<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.deny_codecs = ids.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Keep (`true`, the default) or drop every metadata blob while
+    /// opening (see the `strip_metadata` field).
+    pub fn with_metadata(mut self, keep: bool) -> Self {
+        self.strip_metadata = !keep;
+        self
+    }
+
+    /// Drop every metadata blob while opening.
+    pub fn without_metadata(self) -> Self {
+        self.with_metadata(false)
+    }
+
+    /// Drop these blob kinds while opening (see the field).
+    pub fn with_stripped_blobs<I, K>(mut self, kinds: I) -> Self
+    where
+        I: IntoIterator<Item = K>,
+        K: Into<BlobKind>,
+    {
+        self.strip_blobs = kinds.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Cap the decoded pixels (see the field).
+    pub fn with_max_pixels(mut self, n: u64) -> Self {
+        self.max_pixels = Some(n);
+        self
+    }
+
+    /// Add one still-image decoder option.
+    pub fn with_decoder_option(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.decoder_options.push((name.into(), value.into()));
+        self
+    }
+
+    /// Whether a blob survives these options.
+    pub(crate) fn keeps(&self, blob: &oxideav_core::MetadataBlob) -> bool {
+        !self.strip_metadata && !self.strip_blobs.iter().any(|k| blob.is(k))
+    }
+
+    /// Apply the strip rules to a flattened picture (the unified path
+    /// does not go through the gateway's options).
+    fn strip(&self, img: &mut RgbaImage) {
+        if self.strip_metadata || !self.strip_blobs.is_empty() {
+            img.retain_blobs(|b| self.keeps(b));
+        }
+    }
+
     /// The gateway options the still-image openers hand to
     /// `oxideav_image::decode_reader`: the allow / deny container and
     /// codec lists as the gateway's own (`with_allow_containers` and
     /// friends; a refusal is `ImageError::Restricted`, mapped to
-    /// [`Error::Restricted`]). The extension hint and frame limit are
-    /// added by the opener.
+    /// [`Error::Restricted`]), the metadata strip rules, the pixel
+    /// budget and the decoder options. The extension hint and frame
+    /// limit are added by the opener.
     pub fn to_image_options(&self) -> oxideav_image::OpenOptions {
         let mut g = oxideav_image::OpenOptions::new();
         if let Some(allow) = &self.allow_containers {
@@ -68,6 +206,16 @@ impl OpenOptions {
         }
         if !self.deny_codecs.is_empty() {
             g = g.with_deny_codecs(self.deny_codecs.iter().cloned());
+        }
+        g = g.with_metadata(!self.strip_metadata);
+        if !self.strip_blobs.is_empty() {
+            g = g.with_stripped_blobs(self.strip_blobs.iter().cloned());
+        }
+        if let Some(n) = self.max_pixels {
+            g = g.with_max_pixels(n);
+        }
+        if !self.decoder_options.is_empty() {
+            g = g.with_decoder_options(self.decoder_options.clone());
         }
         g
     }
@@ -280,7 +428,8 @@ pub fn open_with(ctx: &RuntimeContext, src: Source, opts: &OpenOptions) -> Resul
             unreachable!("front was Vector")
         }
         Some(Frame::Video(_)) if opts.eager_image && is_single_image(&reader) => {
-            let img = collapse_front_video(&mut reader, PixelFormat::Rgba)?;
+            let mut img = collapse_front_video(&mut reader, PixelFormat::Rgba)?;
+            opts.strip(&mut img);
             Ok(Opened::Image(img))
         }
         _ => Ok(Opened::Media(reader)),
@@ -542,6 +691,20 @@ fn open_registry(
             return Err(Error::restricted(format!(
                 "codec '{codec_id}' is not permitted by the open options"
             )));
+        }
+        if let (Some(budget), oxideav_core::MediaType::Video) =
+            (opts.max_pixels, s.params.media_type)
+        {
+            let px =
+                u64::from(s.params.width.unwrap_or(0)) * u64::from(s.params.height.unwrap_or(0));
+            if px > budget {
+                return Err(Error::invalid(format!(
+                    "stream {} is {}x{} = {px} pixels, over the {budget}-pixel budget",
+                    s.index,
+                    s.params.width.unwrap_or(0),
+                    s.params.height.unwrap_or(0)
+                )));
+            }
         }
         // A stream without a registered decoder is kept but not decoded.
         decoders.push(ctx.codecs.first_decoder(&s.params).ok());
@@ -1151,6 +1314,84 @@ mod registry_tests {
     }
 
     #[test]
+    fn strip_rules_apply_on_the_gateway_and_unified_paths() {
+        let ctx = testfmt::context();
+        let bytes = fixture();
+        let no_exif = OpenOptions::new().with_stripped_blobs([BlobKind::EXIF]);
+        let img = open_image_with(&ctx, Source::bytes(&bytes), &no_exif).unwrap();
+        assert!(img.exif().is_none() && img.icc().is_some());
+        let Opened::Image(flat) = open_with(
+            &ctx,
+            Source::bytes(&bytes),
+            &no_exif.clone().with_eager_image(true),
+        )
+        .unwrap() else {
+            panic!("expected Image")
+        };
+        assert!(flat.exif().is_none() && flat.icc().is_some());
+        let none = OpenOptions::eager().without_metadata();
+        let file = open_image_file_with(&ctx, Source::bytes(&bytes), &none).unwrap();
+        assert!(!file.has_metadata() && !file.primary().has_metadata());
+        let Opened::Image(flat) = open_with(&ctx, Source::bytes(&bytes), &none).unwrap() else {
+            panic!("expected Image")
+        };
+        assert!(!flat.has_metadata());
+        assert_eq!(flat.pixels.len(), 8, "pixels are untouched by stripping");
+    }
+
+    #[test]
+    fn pixel_budget_refuses_before_decoding_on_both_paths() {
+        let ctx = testfmt::context();
+        let bytes = fixture(); // 2×1 = 2 pixels
+        let tight = OpenOptions::eager().with_max_pixels(1);
+        let r = open_image_with(&ctx, Source::bytes(&bytes), &tight);
+        assert!(matches!(r, Err(Error::Invalid(_))), "{r:?}");
+        let r = open_with(&ctx, Source::bytes(&bytes), &tight);
+        assert!(matches!(r, Err(Error::Invalid(_))), "{r:?}");
+        let fits = OpenOptions::eager().with_max_pixels(2);
+        assert!(open_image_with(&ctx, Source::bytes(&bytes), &fits).is_ok());
+        assert!(open_with(&ctx, Source::bytes(&bytes), &fits).is_ok());
+    }
+
+    #[test]
+    fn every_source_shape_opens_the_same_picture() {
+        let ctx = testfmt::context();
+        let bytes = fixture();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("oxideav-io-r477-{}.iot", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let want = open_image_with(&ctx, Source::bytes(&bytes), &OpenOptions::default())
+            .unwrap()
+            .to_rgba8()
+            .unwrap();
+        // A file path (buffered), a boxed reader parked past byte 0
+        // (probing rewinds), a buffered reader, an owned buffer.
+        let mut parked = std::io::Cursor::new(bytes.clone());
+        parked.set_position(3);
+        let shapes: Vec<Source> = vec![
+            Source::Path(&path),
+            Source::reader(parked),
+            Source::buffered(std::fs::File::open(&path).unwrap()),
+            Source::Bytes(std::borrow::Cow::Owned(bytes.clone())),
+        ];
+        for src in shapes {
+            let ping = ping_format_with(&ctx, src, &OpenOptions::default()).unwrap();
+            assert_eq!(ping.format.as_deref(), Some("iotest"));
+        }
+        for src in [
+            Source::Path(&path),
+            Source::reader(std::io::Cursor::new(bytes.clone())),
+            Source::buffered(std::fs::File::open(&path).unwrap()),
+        ] {
+            let img = open_image_with(&ctx, src, &OpenOptions::default()).unwrap();
+            assert_eq!(img.to_rgba8().unwrap(), want);
+        }
+        let probe = probe_with(&ctx, Source::Path(&path), &OpenOptions::default()).unwrap();
+        assert_eq!(probe.byte_size, Some(bytes.len() as u64));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn gateway_options_carry_the_lists() {
         let opts = OpenOptions {
             allow_containers: Some(vec!["a".into()]),
@@ -1167,5 +1408,32 @@ mod registry_tests {
         let g = OpenOptions::default().to_image_options();
         assert!(g.allow_containers.is_none() && g.deny_containers.is_empty());
         assert!(g.allow_codecs.is_none() && g.deny_codecs.is_empty());
+        assert!(!g.strip_metadata && g.strip_blobs.is_empty());
+        assert!(g.max_pixels.is_none() && g.decoder_options.is_empty());
+        // The builders reach the gateway's fields one for one.
+        let g = OpenOptions::new()
+            .with_allow_containers(["png"])
+            .with_deny_containers(["gif"])
+            .with_allow_codecs(["png"])
+            .with_deny_codecs(["mjpeg"])
+            .without_metadata()
+            .with_stripped_blobs([BlobKind::XMP])
+            .with_max_pixels(10)
+            .with_decoder_option("k", "v")
+            .with_ext_hint("png")
+            .to_image_options();
+        assert_eq!(
+            g.allow_containers.as_deref(),
+            Some(&["png".to_string()][..])
+        );
+        assert_eq!(g.deny_containers, vec!["gif".to_string()]);
+        assert_eq!(g.allow_codecs.as_deref(), Some(&["png".to_string()][..]));
+        assert_eq!(g.deny_codecs, vec!["mjpeg".to_string()]);
+        assert!(g.strip_metadata);
+        assert_eq!(g.strip_blobs, vec![BlobKind::XMP]);
+        assert_eq!(g.max_pixels, Some(10));
+        assert_eq!(g.decoder_options, vec![("k".to_string(), "v".to_string())]);
+        // The hint is the opener's to add.
+        assert!(g.ext_hint.is_none());
     }
 }

@@ -29,9 +29,9 @@ fn ctx() -> &'static RuntimeContext {
 }
 
 fn opts_with_ext(ext: Option<&str>) -> OpenOptions {
-    OpenOptions {
-        ext_hint: ext.map(str::to_string),
-        ..OpenOptions::default()
+    match ext {
+        Some(e) => OpenOptions::new().with_ext_hint(e),
+        None => OpenOptions::new(),
     }
 }
 

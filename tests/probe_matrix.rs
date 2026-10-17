@@ -385,10 +385,7 @@ fn pdf_and_stl_rows_take_the_eager_rungs() {
     assert_eq!(info.byte_size, Some(pdf.len() as u64));
     assert!(info.container.is_none() && info.streams.is_empty());
 
-    let opts = OpenOptions {
-        ext_hint: Some("stl".to_string()),
-        ..OpenOptions::default()
-    };
+    let opts = OpenOptions::new().with_ext_hint("stl");
     let stl = b"solid cube\nendsolid cube\n";
     let p = ping_format_with(c, Source::bytes(stl), &opts).expect("ping stl");
     assert_eq!(
