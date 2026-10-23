@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-io/compare/v0.1.1...v0.2.0) - 2026-10-23
+
+### Other
+
+- edition 2024, MSRV 1.95
+- probe surfaces stream-level blobs under the strip rules; Probe / StreamInfo / PingFormat / TranscodeOptions / Transform hygiene
+- round 477 — metadata and palette-alpha ruling, OpenOptions / SaveOptions builders, HEIF brand naming, buffered sources
+- metadata chain through the fleet and a 25-container ping / probe / gateway matrix
+- SaveOptions adopts the gateway's blobs, strip rules and encoder options; save_rgba_with + zero-config savers
+- OpenOptions adopts the gateway's strip rules, pixel budget and decoder options; buffered sources
+- RgbaImage carries metadata blobs and composites palette alpha; constructors + non_exhaustive
+- an in-crate test container + codec drives the facade on the registry slice
+- allow / deny lists ride the gateway; ImageError::Restricted maps to Error::Restricted
+- ride the oxideav-image gateway for every still-image path
+
 ### Changed
 
 - edition 2024, MSRV 1.95
