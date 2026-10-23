@@ -12,8 +12,8 @@ use oxideav_core::{PixelFormat, RuntimeContext};
 
 use crate::error::{Error, Result};
 use crate::image::RgbaImage;
-use crate::open::{open_with, OpenOptions, Opened};
-use crate::save::{save_with, PixelChoice, SaveOptions};
+use crate::open::{OpenOptions, Opened, open_with};
+use crate::save::{PixelChoice, SaveOptions, save_with};
 use crate::source::{Sink, Source};
 
 /// A single still-image transformation applied between decode and

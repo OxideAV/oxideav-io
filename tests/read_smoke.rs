@@ -8,7 +8,7 @@
 
 use std::io::Write;
 
-use oxideav_io::{open, open_image, open_image_file, Opened, RgbaImage};
+use oxideav_io::{Opened, RgbaImage, open, open_image, open_image_file};
 
 /// Minimal 2×2 binary PPM (P6, 8-bit RGB), top-down.
 /// Pixels: (0,0)=red (1,0)=white (0,1)=blue (1,1)=green.
@@ -41,7 +41,7 @@ fn open_image_path_native_and_flattened() {
     assert_eq!(img.stride, 8);
     assert_eq!(img.pixels.len(), 16);
     assert_eq!(&img.pixels[0..4], &[255, 0, 0, 255]); // top-left red, opaque
-                                                      // The deprecated flattener is the same picture.
+    // The deprecated flattener is the same picture.
     assert_eq!(legacy, img);
 }
 

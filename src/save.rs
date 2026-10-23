@@ -369,7 +369,7 @@ mod unit_tests {
 #[cfg(all(test, feature = "full"))]
 mod tests {
     use super::*;
-    use crate::open::{open_with, OpenOptions};
+    use crate::open::{OpenOptions, open_with};
     use crate::source::Source;
 
     fn ctx() -> RuntimeContext {
@@ -609,7 +609,7 @@ mod tests {
 #[cfg(test)]
 mod registry_tests {
     use super::*;
-    use crate::open::{open_image_file_with, open_with, OpenOptions};
+    use crate::open::{OpenOptions, open_image_file_with, open_with};
     use crate::source::Source;
     use crate::testfmt;
 

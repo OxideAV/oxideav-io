@@ -26,8 +26,8 @@ mod imp {
     use criterion::{BatchSize, Criterion};
     use oxideav_core::RuntimeContext;
     use oxideav_io::{
-        ping_format_with, probe_with, save_with, OpenOptions, Opened, RgbaImage, SaveOptions, Sink,
-        Source,
+        OpenOptions, Opened, RgbaImage, SaveOptions, Sink, Source, ping_format_with, probe_with,
+        save_with,
     };
 
     fn ctx() -> RuntimeContext {

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- edition 2024, MSRV 1.95
 - **Allow / deny lists ride the gateway.** `OpenOptions`'s
   `allow_containers` / `deny_containers` / `allow_codecs` / `deny_codecs`
   are handed to `oxideav_image::OpenOptions` (`with_allow_*` /

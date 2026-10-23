@@ -71,11 +71,7 @@ pub(crate) fn context() -> RuntimeContext {
 }
 
 fn probe(p: &ProbeData) -> ProbeScore {
-    if p.buf.starts_with(MAGIC) {
-        100
-    } else {
-        0
-    }
+    if p.buf.starts_with(MAGIC) { 100 } else { 0 }
 }
 
 // ───────────────────────── wire form ─────────────────────────

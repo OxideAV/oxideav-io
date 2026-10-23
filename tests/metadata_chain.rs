@@ -16,8 +16,8 @@ use std::sync::OnceLock;
 
 use oxideav_core::{BlobKind, MetadataBlob, RuntimeContext};
 use oxideav_io::{
-    open_image_file_with, open_image_with, open_with, save_image_with, save_rgba_with, save_with,
-    OpenOptions, Opened, RgbaImage, SaveOptions, Sink, Source,
+    OpenOptions, Opened, RgbaImage, SaveOptions, Sink, Source, open_image_file_with,
+    open_image_with, open_with, save_image_with, save_rgba_with, save_with,
 };
 
 fn ctx() -> &'static RuntimeContext {
@@ -168,12 +168,16 @@ fn strip_rules_drop_blobs_on_open_and_on_save() {
     let bytes = save(&src, "heic", SaveOptions::new());
     // On open: every shape.
     let none = OpenOptions::new().without_metadata();
-    assert!(!open_image_with(ctx(), Source::bytes(&bytes), &none)
-        .unwrap()
-        .has_metadata());
-    assert!(!open_image_file_with(ctx(), Source::bytes(&bytes), &none)
-        .unwrap()
-        .has_metadata());
+    assert!(
+        !open_image_with(ctx(), Source::bytes(&bytes), &none)
+            .unwrap()
+            .has_metadata()
+    );
+    assert!(
+        !open_image_file_with(ctx(), Source::bytes(&bytes), &none)
+            .unwrap()
+            .has_metadata()
+    );
     assert!(!open_flat(&bytes, &none).has_metadata());
     let no_exif = OpenOptions::new().with_stripped_blobs([BlobKind::EXIF]);
     let flat = open_flat(&bytes, &no_exif);

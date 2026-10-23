@@ -94,13 +94,13 @@ pub use image::RgbaImage;
 #[cfg(feature = "registry")]
 #[allow(deprecated)]
 pub use open::{
-    open_image_file_with, open_image_with, open_media_with, open_rgb_with, open_rgba_with,
-    open_with, ping_format_with, probe_with, DecodedFrame, MediaReader, OpenOptions, Opened,
+    DecodedFrame, MediaReader, OpenOptions, Opened, open_image_file_with, open_image_with,
+    open_media_with, open_rgb_with, open_rgba_with, open_with, ping_format_with, probe_with,
 };
 #[cfg(feature = "registry")]
-pub use probe::{MediaKind, PingFormat, Probe, StreamInfo, StreamKind, PING_FORMAT_MAX_READ_BYTES};
+pub use probe::{MediaKind, PING_FORMAT_MAX_READ_BYTES, PingFormat, Probe, StreamInfo, StreamKind};
 #[cfg(feature = "registry")]
-pub use save::{save_image_with, save_rgba_with, save_with, PixelChoice, SaveOptions};
+pub use save::{PixelChoice, SaveOptions, save_image_with, save_rgba_with, save_with};
 
 /// The gateway's native picture types, re-exported so callers of
 /// [`open_image`] / [`open_image_with`] need no direct `oxideav-image`
@@ -110,7 +110,7 @@ pub use oxideav_image::{Image, ImageFile};
 #[cfg(feature = "registry")]
 pub use source::{Sink, Source};
 #[cfg(feature = "registry")]
-pub use transcode::{transcode_with, TranscodeOptions, Transform};
+pub use transcode::{TranscodeOptions, Transform, transcode_with};
 
 #[cfg(all(feature = "registry", feature = "mesh"))]
 pub use open::open_mesh_with;

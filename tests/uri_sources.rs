@@ -12,7 +12,7 @@
 use std::sync::OnceLock;
 
 use oxideav_core::RuntimeContext;
-use oxideav_io::{ping_format_with, probe_with, MediaKind, OpenOptions, Source};
+use oxideav_io::{MediaKind, OpenOptions, Source, ping_format_with, probe_with};
 
 fn ctx() -> &'static RuntimeContext {
     static CTX: OnceLock<RuntimeContext> = OnceLock::new();

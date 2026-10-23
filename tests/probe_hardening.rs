@@ -15,7 +15,7 @@
 use std::sync::OnceLock;
 
 use oxideav_core::RuntimeContext;
-use oxideav_io::{open_with, ping_format_with, probe_with, Error, MediaKind, OpenOptions, Source};
+use oxideav_io::{Error, MediaKind, OpenOptions, Source, open_with, ping_format_with, probe_with};
 
 /// One shared meta-backed context for the whole suite (building it per
 /// test would re-register the full fleet dozens of times).
@@ -216,7 +216,7 @@ fn mesh_extension_on_garbage_is_mesh_but_open_fails_cleanly() {
 
 /// Build a tiny valid PNG through the facade's own save path.
 fn tiny_png() -> Vec<u8> {
-    use oxideav_io::{save_with, Opened, RgbaImage, SaveOptions, Sink};
+    use oxideav_io::{Opened, RgbaImage, SaveOptions, Sink, save_with};
     let img = RgbaImage::rgba(3, 2, [10u8, 20, 30, 255].repeat(6)).unwrap();
     let mut buf = Vec::new();
     let opts = SaveOptions::new().with_container("png");
@@ -226,7 +226,7 @@ fn tiny_png() -> Vec<u8> {
 
 /// Build a tiny valid JPEG through the facade's own save path.
 fn tiny_jpeg() -> Vec<u8> {
-    use oxideav_io::{save_with, Opened, PixelChoice, RgbaImage, SaveOptions, Sink};
+    use oxideav_io::{Opened, PixelChoice, RgbaImage, SaveOptions, Sink, save_with};
     let img = RgbaImage::rgba(3, 2, [10u8, 20, 30, 255].repeat(6)).unwrap();
     let mut buf = Vec::new();
     let opts = SaveOptions::new()

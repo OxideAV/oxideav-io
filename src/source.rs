@@ -152,11 +152,7 @@ fn ext_of_uri(uri: &str) -> Option<&str> {
     let last = last.split('#').next().unwrap_or(last);
     let dot = last.rfind('.')?;
     let ext = &last[dot + 1..];
-    if ext.is_empty() {
-        None
-    } else {
-        Some(ext)
-    }
+    if ext.is_empty() { None } else { Some(ext) }
 }
 
 #[cfg(test)]

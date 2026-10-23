@@ -11,7 +11,7 @@ use oxideav_image::{Image, ImageFile};
 use crate::error::{Error, Result};
 use crate::image::RgbaImage;
 use crate::probe::{
-    is_mesh3d, is_pdf, peek_magic, MediaKind, PingFormat, Probe, StreamInfo as ProbeStreamInfo,
+    MediaKind, PingFormat, Probe, StreamInfo as ProbeStreamInfo, is_mesh3d, is_pdf, peek_magic,
 };
 use crate::source::Source;
 

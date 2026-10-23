@@ -223,7 +223,7 @@ impl RgbaImage {
             other => {
                 return Err(Error::invalid(format!(
                     "RgbaImage: destination must be Rgba or Rgb24, got {other:?}"
-                )))
+                )));
             }
         };
         let (width, height) = (img.width(), img.height());

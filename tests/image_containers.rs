@@ -16,8 +16,8 @@ use std::sync::OnceLock;
 
 use oxideav_core::RuntimeContext;
 use oxideav_io::{
-    open_image_file_with, open_with, ping_format_with, probe_with, MediaKind, OpenOptions, Opened,
-    Source,
+    MediaKind, OpenOptions, Opened, Source, open_image_file_with, open_with, ping_format_with,
+    probe_with,
 };
 
 fn ctx() -> &'static RuntimeContext {
