@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- API hygiene: `MediaKind`, `StreamKind`, `PixelChoice`, `Source`,
+  `Sink` and `DecodedFrame` are now `#[non_exhaustive]` so future
+  variants / fields are non-breaking. Match with a `_` arm; build
+  `DecodedFrame` with `DecodedFrame::new`.
 - edition 2024, MSRV 1.95
 - **Allow / deny lists ride the gateway.** `OpenOptions`'s
   `allow_containers` / `deny_containers` / `allow_codecs` / `deny_codecs`
@@ -58,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `DecodedFrame::new(stream_index, frame)`.
 - **`probe` surfaces stream-level blobs.** `StreamInfo::blobs` (what the
   demuxer declared on the stream, read from the header, after the
   `OpenOptions` strip rules) with `blob(&kind)` / `icc()` / `exif()` /

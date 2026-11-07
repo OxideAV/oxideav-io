@@ -26,6 +26,7 @@ use crate::error::Result;
 /// telling a single-frame image apart from a 1-frame video requires a
 /// decode, which [`probe`](crate::probe) deliberately avoids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MediaKind {
     /// A PDF document → decodes eagerly to an `oxideav_scene::Scene`.
     Scene,
@@ -41,6 +42,7 @@ pub enum MediaKind {
 /// probe surface doesn't leak a core type into callers that only enabled
 /// the `registry` feature for the lean entry points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StreamKind {
     /// An audio stream.
     Audio,

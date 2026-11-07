@@ -27,6 +27,7 @@ use crate::source::Sink;
 /// `Gray8`, `Yuv444P`, `Yuv420P`, `Rgba64Le`) until the encoder and the
 /// muxer both accept one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PixelChoice {
     /// Let the gateway's ladder pick a layout the codec + container
     /// accept, starting from the image's own.

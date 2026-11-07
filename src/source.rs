@@ -17,6 +17,7 @@ use oxideav_core::{ReadSeek, RuntimeContext, SourceOutput};
 use crate::error::{Error, Result};
 
 /// Something the facade can open for reading.
+#[non_exhaustive]
 pub enum Source<'a> {
     /// A local filesystem path, opened with [`std::fs::File`] behind a
     /// [`BufReader`] (every probe and demuxer read is buffered).
@@ -95,6 +96,7 @@ impl<'a> Source<'a> {
 /// by the encode path, then committed verbatim, so even the streaming
 /// shapes (`Writer`) work with muxers that need a seekable sink: the
 /// facade buffers the encoded bytes in memory first.
+#[non_exhaustive]
 pub enum Sink<'a> {
     /// A local filesystem path, created / truncated with [`std::fs::File`].
     Path(&'a Path),

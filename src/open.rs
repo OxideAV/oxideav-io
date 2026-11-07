@@ -267,9 +267,23 @@ impl std::fmt::Debug for Opened {
 }
 
 /// A frame yielded by [`MediaReader`], tagged with its stream.
+///
+/// `#[non_exhaustive]`: build with [`DecodedFrame::new`]; the fields
+/// stay readable.
+#[non_exhaustive]
 pub struct DecodedFrame {
     pub stream_index: u32,
     pub frame: Frame,
+}
+
+impl DecodedFrame {
+    /// A decoded `frame` from stream `stream_index`.
+    pub fn new(stream_index: u32, frame: Frame) -> Self {
+        Self {
+            stream_index,
+            frame,
+        }
+    }
 }
 
 /// Lazy reader over an opened demuxer + its resolved decoders. Pulls
